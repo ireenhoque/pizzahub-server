@@ -7,6 +7,30 @@ import { SUBSCRIPTION_PLANS, type SubscriptionPlan } from '../../types/common.ty
 import type { ListUsersQuery, ListUsersResult, PublicUser, UpdateSelfInput } from './user.types.js';
 
 /**
+ * Whether the vendor currently holds premium privileges. The subscription
+ * must be the `premium` plan AND unexpired — an expired premium
+ * subscription falls back to free-tier limits. The check runs against the
+ * fresh MongoDB user document on every menu creation.
+ */
+export function hasActivePremiumSubscription(user: BetterAuthUser): boolean {
+  if (user.subscriptionPlan !== 'premium') {
+    return false;
+  }
+
+  // A premium subscription must carry a real, future expiration date.
+  if (user.subscriptionExpiresAt === undefined || user.subscriptionExpiresAt === null) {
+    return false;
+  }
+
+  const expiry =
+    typeof user.subscriptionExpiresAt === 'string'
+      ? Date.parse(user.subscriptionExpiresAt)
+      : user.subscriptionExpiresAt.getTime();
+
+  return !Number.isNaN(expiry) && expiry > Date.now();
+}
+
+/**
  * User & profile business logic.
  *
  * IMPORTANT: this service reads and writes ONLY the Better Auth-managed

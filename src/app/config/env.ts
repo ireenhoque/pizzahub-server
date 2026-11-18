@@ -27,6 +27,7 @@ const dbName = readRequiredEnv('DB_NAME');
 const betterAuthJwksUrl = readRequiredUrlEnv('BETTER_AUTH_JWKS_URL');
 const jwtIssuer = readRequiredEnv('JWT_ISSUER');
 const jwtAudience = readRequiredEnv('JWT_AUDIENCE');
+const imgbbApiKey = readRequiredEnv('IMGBB_API_KEY');
 
 if (Number.isNaN(port)) {
   throw new Error('Environment variable PORT must be a valid number');
@@ -42,4 +43,7 @@ export const env = {
   betterAuthJwksUrl,
   jwtIssuer,
   jwtAudience,
+  imgbbApiKey,
+  /** Overridable for tests/staging; production uses the real ImgBB API. */
+  imgbbUploadUrl: process.env.IMGBB_UPLOAD_URL ?? 'https://api.imgbb.com/1/upload',
 } as const;

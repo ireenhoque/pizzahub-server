@@ -2,10 +2,14 @@ import { Router, type RequestHandler } from 'express';
 import { checkDatabaseHealth } from '../config/db.js';
 import { env } from '../config/env.js';
 import { createUserRouter } from '../modules/users/user.routes.js';
+import { createMenuRouter } from '../modules/menuItems/menu.routes.js';
+import type { UploadImageFn } from '../modules/menuItems/menu-item.types.js';
 
 export interface ApiRouterOptions {
   /** Injectable auth middleware (tests supply a local-JWKS instance). */
   requireAuth: RequestHandler;
+  /** Injectable image uploader (tests supply fakes). */
+  uploadImage?: UploadImageFn;
 }
 
 export function createApiRouter(options: ApiRouterOptions): Router {
@@ -34,6 +38,12 @@ export function createApiRouter(options: ApiRouterOptions): Router {
 
   // /api/users — user & profile APIs
   router.use('/users', createUserRouter(options.requireAuth));
+
+  // /api/menu-items — vendor menu APIs
+  router.use(
+    '/menu-items',
+    createMenuRouter(options.requireAuth, { uploadImage: options.uploadImage }),
+  );
 
   return router;
 }
