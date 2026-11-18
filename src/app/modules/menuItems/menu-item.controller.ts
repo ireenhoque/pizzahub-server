@@ -62,7 +62,40 @@ interface ValidatedParams {
  * Read/update/delete controllers. These endpoints perform no uploads, so
  * they need no injected dependencies.
  */
-export const menuItemControllers = {
+export const adminMenuItemControllers = {
+  /** GET /api/menu-items/admin/pending — list pending items for moderation. */
+  listPendingMenuItems: (async (req, res, next) => {
+    try {
+      const query = { ...req.validatedQuery, status: 'pending' } as any;
+      const result = await menuItemService.listAllMenuItemsForAdmin(query);
+      res.status(200).json({ success: true, message: 'Pending menu items retrieved', data: result });
+    } catch (error) {
+      next(error);
+    }
+  }) as RequestHandler,
+
+  /** PATCH /api/menu-items/admin/:id/approve — approve a pending item. */
+  approveMenuItem: (async (req, res, next) => {
+    try {
+      const { id } = req.validatedParams as { id: string };
+      const menuItem = await menuItemService.setMenuItemStatus(id, 'active');
+      res.status(200).json({ success: true, message: 'Menu item approved', data: { menuItem } });
+    } catch (error) {
+      next(error);
+    }
+  }) as RequestHandler,
+
+  /** PATCH /api/menu-items/admin/:id/reject — reject a pending item. */
+  rejectMenuItem: (async (req, res, next) => {
+    try {
+      const { id } = req.validatedParams as { id: string };
+      const menuItem = await menuItemService.setMenuItemStatus(id, 'rejected');
+      res.status(200).json({ success: true, message: 'Menu item rejected', data: { menuItem } });
+    } catch (error) {
+      next(error);
+    }
+  }) as RequestHandler,
+};
   /** GET /api/menu-items — public storefront listing (active items only). */
   listPublicMenuItems: (async (req, res, next) => {
     try {

@@ -2,7 +2,8 @@ import { Router, type RequestHandler } from 'express';
 import { optionalAuth, requireAdmin, requireVendor } from '../../auth/require-auth.js';
 import { uploadSingleImage } from '../../middlewares/upload.js';
 import { validate } from '../../middlewares/validate.js';
-import { createMenuItemControllers, menuItemControllers } from './menu-item.controller.js';
+import { adminMenuItemControllers } from './menu-item.controller.js';
+
 import {
   adminListMenuItemsQuerySchema,
   adminSetMenuItemStatusSchema,
