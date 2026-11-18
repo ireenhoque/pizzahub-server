@@ -2,7 +2,8 @@ import { Router, type RequestHandler } from 'express';
 import { checkDatabaseHealth } from '../config/db.js';
 import { env } from '../config/env.js';
 import { createUserRouter } from '../modules/users/user.routes.js';
-import { createMenuRouter } from '../modules/menuItems/menu.routes.js';
+import { createOrderRouter } from '../modules/orders/order.routes.js';
+
 import type { UploadImageFn } from '../modules/menuItems/menu-item.types.js';
 
 export interface ApiRouterOptions {
@@ -39,7 +40,12 @@ export function createApiRouter(options: ApiRouterOptions): Router {
   // /api/users — user & profile APIs
   router.use('/users', createUserRouter(options.requireAuth));
 
-  // /api/menu-items — vendor menu APIs
+  // /api/orders — order APIs
+  router.use(
+    '/orders',
+    createOrderRouter(options.requireAuth),
+  );
+
   router.use(
     '/menu-items',
     createMenuRouter(options.requireAuth, { uploadImage: options.uploadImage }),

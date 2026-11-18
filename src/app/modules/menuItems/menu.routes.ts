@@ -2,7 +2,17 @@ import { Router, type RequestHandler } from 'express';
 import { optionalAuth, requireAdmin, requireVendor } from '../../auth/require-auth.js';
 import { uploadSingleImage } from '../../middlewares/upload.js';
 import { validate } from '../../middlewares/validate.js';
-import { adminMenuItemControllers } from './menu-item.controller.js';
+import { adminMenuItemControllers, createMenuItemControllers, listPublicMenuItems, listMyMenuItems, updateMyMenuItem, deleteMyMenuItem, listAllMenuItems, setMenuItemStatus, getMenuItem } from './menu-item.controller.js';
+
+const menuItemControllers = {
+  listPublicMenuItems,
+  listMyMenuItems,
+  updateMyMenuItem,
+  deleteMyMenuItem,
+  listAllMenuItems,
+  setMenuItemStatus,
+  getMenuItem,
+};
 
 import {
   adminListMenuItemsQuerySchema,
@@ -80,6 +90,27 @@ export function createMenuRouter(
     validate({ params: menuItemIdParamSchema }),
     menuItemControllers.deleteMyMenuItem,
   );
+
+  // ── Admin pending menu items ────────────────────────────────────────
+
+
+  // ── Admin approve / reject actions ────────────────────────────────────────
+  router.patch(
+    '/admin/:id/approve',
+    requireAuth,
+    requireAdmin,
+    validate({ params: menuItemIdParamSchema }),
+    adminMenuItemControllers.approveMenuItem,
+  );
+
+  router.patch(
+    '/admin/:id/reject',
+    requireAuth,
+    requireAdmin,
+    validate({ params: menuItemIdParamSchema }),
+    adminMenuItemControllers.rejectMenuItem,
+  );
+
 
   // ── Admin review & management ────────────────────────────────────────
   router.get(

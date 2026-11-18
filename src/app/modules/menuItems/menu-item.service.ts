@@ -124,6 +124,8 @@ export const menuItemService = {
     const result = await getMenuItemsCollection().insertOne(doc as MenuItem);
 
     return toPublicMenuItem({ ...doc, _id: result.insertedId } as MenuItem);
+  },
+
 
   /**
    * Public storefront listing — ONLY `active` items. `pending`, `rejected`,
@@ -132,7 +134,7 @@ export const menuItemService = {
    * results.
    */
   // Public storefront listing — ONLY `active` and `isAvailable` items with advanced filtering & sorting.
-  async listPublicMenuItems(query: PublicListMenuItemsQuery): Promise<ListMenuItemsResult> {
+  listPublicMenuItems: async (query: PublicListMenuItemsQuery): Promise<ListMenuItemsResult> => {
     // Base filter ensures only approved & available items are shown.
     const baseFilter: Filter<MenuItem> = { status: 'active', isAvailable: true } as any;
 
@@ -163,8 +165,7 @@ export const menuItemService = {
     };
 
     return paginateMenuItems(filterWithSearch, query, sortSpec);
-
-
+  },
   /** Vendor listing — own items only, every status, optional status filter. */
   async listVendorMenuItems(
     vendorId: string,
