@@ -2,6 +2,7 @@ import type { Server } from 'http';
 import app from './app.js';
 import { connectDatabase, disconnectDatabase } from './app/config/db.js';
 import { env } from './app/config/env.js';
+import { ensureIndexes } from './app/db/indexes.js';
 
 let server: Server | null = null;
 
@@ -46,7 +47,11 @@ process.on('SIGTERM', () => shutdown(0, '🛑 SIGTERM received, shutting down gr
 process.on('SIGINT', () => shutdown(0, '🛑 SIGINT received, shutting down gracefully'));
 
 connectDatabase()
-  .then(() => {
+  .then(async (db) => {
+    // Safe + repeatable: identical index definitions are no-ops, and
+    // collections that do not exist yet are skipped so startup never
+    // implicitly creates empty business collections.
+    await ensureIndexes(db);
     startServer();
   })
   .catch(() => {
