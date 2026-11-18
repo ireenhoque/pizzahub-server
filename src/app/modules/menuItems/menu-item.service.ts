@@ -1,10 +1,26 @@
+import { ObjectId, type Filter } from 'mongodb';
 import { findBetterAuthUserById, getMenuItemsCollection } from '../../db/collections.js';
 import { ApiError } from '../../error/ApiError.js';
 import type { AuthenticatedUser } from '../../auth/auth.types.js';
+import { assertOwnership } from '../../auth/ownership.js';
 import { hasActivePremiumSubscription } from '../users/user.service.js';
-import { MENU_ITEM_CURRENCY, type MenuItem } from '../../types/menuItem.types.js';
+import {
+  MENU_ITEM_CURRENCY,
+  type MenuItem,
+  type MenuItemStatus,
+} from '../../types/menuItem.types.js';
+import { escapeRegex } from '../../utils/regex.js';
 import { uploadToImgBB } from '../../utils/imgbb.js';
-import type { CreateMenuItemInput, PublicMenuItem, UploadImageFn } from './menu-item.types.js';
+import type {
+  AdminListMenuItemsQuery,
+  CreateMenuItemInput,
+  ListMenuItemsResult,
+  PublicListMenuItemsQuery,
+  PublicMenuItem,
+  UploadImageFn,
+  VendorListMenuItemsQuery,
+  VendorUpdateMenuItemInput,
+} from './menu-item.types.js';
 
 /** Free-plan vendors can keep at most this many `active` menu items. */
 export const FREE_PLAN_MAX_ACTIVE_MENU_ITEMS = 3;
@@ -109,4 +125,209 @@ export const menuItemService = {
 
     return toPublicMenuItem({ ...doc, _id: result.insertedId } as MenuItem);
   },
+
+  /**
+   * Public storefront listing — ONLY `active` items. `pending`, `rejected`,
+   * `inactive` and `out_of_stock` documents are structurally excluded by the
+   * status filter, so no review-state item can ever leak into public
+   * results.
+   */
+  async listPublicMenuItems(query: PublicListMenuItemsQuery): Promise<ListMenuItemsResult> {
+    return paginateMenuItems(
+      buildSearchFilter({ status: 'active' }, query.search, query.category),
+      query,
+    );
+  },
+
+  /** Vendor listing — own items only, every status, optional status filter. */
+  async listVendorMenuItems(
+    vendorId: string,
+    query: VendorListMenuItemsQuery,
+  ): Promise<ListMenuItemsResult> {
+    const filter: Filter<MenuItem> = { vendorId };
+    if (query.status) {
+      filter.status = query.status;
+    }
+    return paginateMenuItems(filter, query);
+  },
+
+  /** Admin listing — every item, filterable by status/vendor/category/search. */
+  async listAllMenuItemsForAdmin(query: AdminListMenuItemsQuery): Promise<ListMenuItemsResult> {
+    const filter: Filter<MenuItem> = {};
+    if (query.status) {
+      filter.status = query.status;
+    }
+    if (query.vendorId) {
+      filter.vendorId = query.vendorId;
+    }
+    return paginateMenuItems(buildSearchFilter(filter, query.search, query.category), query);
+  },
+
+  /**
+   * Role-aware detail lookup.
+   *
+   * - admins see everything;
+   * - vendors see their OWN items in any state (ownership check);
+   * - everyone else only sees `active` items — anything else returns null
+   *   (rendered as 404, so the existence of pending/rejected items is never
+   *   revealed).
+   */
+  async getMenuItemForViewer(
+    id: string,
+    viewer: AuthenticatedUser | null,
+  ): Promise<PublicMenuItem | null> {
+    const item = await getMenuItemsCollection().findOne({ _id: toMenuItemId(id) });
+    if (!item) {
+      return null;
+    }
+
+    if (viewer?.roles.includes('admin')) {
+      return toPublicMenuItem(item);
+    }
+
+    if (viewer?.roles.includes('vendor') && item.vendorId === viewer.userId) {
+      return toPublicMenuItem(item);
+    }
+
+    if (item.status !== 'active') {
+      return null;
+    }
+
+    return toPublicMenuItem(item);
+  },
+
+  /**
+   * Vendor update of THEIR OWN item. Ownership is verified from the DB
+   * document; non-owners get 403. Only whitelisted fields are applied —
+   * status/vendorId/ratings/image URLs are structurally unreachable.
+   */
+  async updateMenuItemByVendor(
+    vendor: AuthenticatedUser,
+    id: string,
+    updates: VendorUpdateMenuItemInput,
+  ): Promise<PublicMenuItem> {
+    const items = getMenuItemsCollection();
+    const item = await items.findOne({ _id: toMenuItemId(id) });
+    if (!item) {
+      throw new ApiError(404, 'Menu item not found');
+    }
+
+    assertOwnership(vendor, item.vendorId);
+
+    const set: Record<string, unknown> = { updatedAt: new Date() };
+    if (updates.name !== undefined) set.name = updates.name;
+    if (updates.description !== undefined) set.description = updates.description;
+    if (updates.category !== undefined) set.category = updates.category;
+    if (updates.price !== undefined) set.price = updates.price;
+    if (updates.location !== undefined) set.location = updates.location;
+    if (updates.tags !== undefined) set.tags = updates.tags;
+    if (updates.isAvailable !== undefined) set.isAvailable = updates.isAvailable;
+
+    await items.updateOne({ _id: item._id }, { $set: set });
+
+    const updated = await items.findOne({ _id: item._id });
+    if (!updated) {
+      throw new ApiError(404, 'Menu item not found');
+    }
+    return toPublicMenuItem(updated);
+  },
+
+  /**
+   * Vendor delete of THEIR OWN item (hard delete). Ownership verified from
+   * the DB document; missing items 404, non-owners 403.
+   */
+  async deleteMenuItemByVendor(vendor: AuthenticatedUser, id: string): Promise<PublicMenuItem> {
+    const items = getMenuItemsCollection();
+    const item = await items.findOne({ _id: toMenuItemId(id) });
+    if (!item) {
+      throw new ApiError(404, 'Menu item not found');
+    }
+
+    assertOwnership(vendor, item.vendorId);
+
+    await items.deleteOne({ _id: item._id });
+    return toPublicMenuItem(item);
+  },
+
+  /**
+   * Admin status management (approve → 'active', reject → 'rejected',
+   * re-submit → 'pending', etc.). Approval also flips `isAvailable` to true
+   * so approved items are immediately live; other transitions leave vendor
+   * availability untouched.
+   */
+  async setMenuItemStatus(id: string, status: MenuItemStatus): Promise<PublicMenuItem> {
+    const items = getMenuItemsCollection();
+    const item = await items.findOne({ _id: toMenuItemId(id) });
+    if (!item) {
+      throw new ApiError(404, 'Menu item not found');
+    }
+
+    const set: Record<string, unknown> = { status, updatedAt: new Date() };
+    if (status === 'active') {
+      set.isAvailable = true;
+    }
+
+    await items.updateOne({ _id: item._id }, { $set: set });
+
+    const updated = await items.findOne({ _id: item._id });
+    if (!updated) {
+      throw new ApiError(404, 'Menu item not found');
+    }
+    return toPublicMenuItem(updated);
+  },
 };
+
+/** Validates a route id as a Mongo ObjectId (invalid ids → 400 ApiError). */
+function toMenuItemId(id: string): ObjectId {
+  if (!ObjectId.isValid(id)) {
+    throw new ApiError(400, 'Invalid menu item id');
+  }
+  return new ObjectId(id);
+}
+
+/** Builds the shared text-search filter (escaped regex on name/description). */
+function buildSearchFilter(
+  base: Filter<MenuItem>,
+  search?: string,
+  category?: MenuItem['category'],
+): Filter<MenuItem> {
+  const filter: Filter<MenuItem> = { ...base };
+  if (category) {
+    filter.category = category;
+  }
+  if (search) {
+    const pattern = escapeRegex(search);
+    filter.$or = [
+      { name: { $regex: pattern, $options: 'i' } },
+      { description: { $regex: pattern, $options: 'i' } },
+    ];
+  }
+  return filter;
+}
+
+/** Paginates a menu item filter, newest first. */
+async function paginateMenuItems(
+  filter: Filter<MenuItem>,
+  query: { page: number; limit: number },
+): Promise<ListMenuItemsResult> {
+  const items = getMenuItemsCollection();
+  const total = await items.countDocuments(filter);
+  const skip = (query.page - 1) * query.limit;
+
+  const docs = await items
+    .find(filter)
+    .sort({ createdAt: -1, _id: 1 })
+    .skip(skip)
+    .limit(query.limit)
+    .toArray();
+
+  return {
+    items: docs.map(toPublicMenuItem),
+    pagination: {
+      page: query.page,
+      limit: query.limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / query.limit)),
+    },
+  };
+}

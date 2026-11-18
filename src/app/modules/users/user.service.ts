@@ -4,6 +4,7 @@ import { ApiError } from '../../error/ApiError.js';
 import type { BetterAuthUser } from '../../auth/auth.types.js';
 import { isUserBlocked, normalizeRoles } from '../../auth/require-auth.js';
 import { SUBSCRIPTION_PLANS, type SubscriptionPlan } from '../../types/common.types.js';
+import { escapeRegex } from '../../utils/regex.js';
 import type { ListUsersQuery, ListUsersResult, PublicUser, UpdateSelfInput } from './user.types.js';
 
 /**
@@ -61,10 +62,6 @@ export function toPublicUser(user: BetterAuthUser): PublicUser {
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
   };
-}
-
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 export const userService = {

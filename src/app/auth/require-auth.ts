@@ -158,6 +158,22 @@ export const requireAdmin = requireRole('admin');
 export const requireVendor = requireRole('vendor');
 export const requireCustomer = requireRole('customer');
 
+/**
+ * Runs the auth middleware only when an Authorization header is present.
+ * Anonymous requests proceed with `req.auth` undefined (public visibility
+ * rules apply). A present-but-invalid token still fails with 401 — bad
+ * credentials are never silently downgraded to anonymous access.
+ */
+export function optionalAuth(authMiddleware: RequestHandler): RequestHandler {
+  return (req, res, next): void => {
+    if (!req.headers.authorization) {
+      next();
+      return;
+    }
+    authMiddleware(req, res, next);
+  };
+}
+
 /** Env-wired instance used when mounting protected business routes. */
 export const requireAuth = createRequireAuth({
   jwksUrl: env.betterAuthJwksUrl,

@@ -1,10 +1,17 @@
 import type { BaseDocument, UserReference } from './common.types.js';
 
 /**
- * `pending` is the initial state: newly created items await admin approval
- * before becoming `active` (visible/purchasable in the storefront).
+ * Lifecycle: `pending` (awaiting admin approval) → `active` (public) or
+ * `rejected`. Vendors may toggle `inactive`/`out_of_stock` later; admins
+ * manage all status transitions.
  */
-export const MENU_ITEM_STATUSES = ['pending', 'active', 'inactive', 'out_of_stock'] as const;
+export const MENU_ITEM_STATUSES = [
+  'pending',
+  'active',
+  'rejected',
+  'inactive',
+  'out_of_stock',
+] as const;
 export type MenuItemStatus = (typeof MENU_ITEM_STATUSES)[number];
 
 export const MENU_ITEM_CATEGORIES = ['pizza', 'sides', 'drinks', 'desserts', 'combos'] as const;

@@ -25,6 +25,13 @@ export const INDEX_DEFINITIONS: IndexDefinition[] = [
   },
   {
     collection: COLLECTIONS.menuItems,
+    keys: { status: 1, category: 1, createdAt: -1 },
+    options: { name: 'idx_status_category_createdAt_desc' },
+    description:
+      'Public storefront listing: only `active` items are returned, optionally filtered by category and sorted newest-first. Status-first placement keeps pending/rejected documents out of the scan.',
+  },
+  {
+    collection: COLLECTIONS.menuItems,
     keys: { name: 'text', description: 'text', tags: 'text' },
     options: {
       name: 'search_text',
