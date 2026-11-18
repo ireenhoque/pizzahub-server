@@ -1,32 +1,46 @@
+import type { Express } from 'express';
 import cors from 'cors';
-import express, { type Application } from 'express';
+import express from 'express';
 import morgan from 'morgan';
+import { requireAuth } from './app/auth/require-auth.js';
 import { env } from './app/config/env.js';
 import { globalErrorHandler } from './app/error/globalErrorHandler.js';
 import { notFoundHandler } from './app/error/notFoundHandler.js';
-import router from './app/routes/index.js';
+import { createApiRouter } from './app/routes/index.js';
 
-const app: Application = express();
+export interface AppOptions {
+  /**
+   * Injectable auth middleware — defaults to the env-wired `requireAuth`.
+   * Tests inject an instance pointed at a local JWKS endpoint.
+   */
+  requireAuthMiddleware?: typeof requireAuth;
+}
 
-// --- Global middlewares ---
-app.use(
-  cors({
-    origin: '*',
-  }),
-);
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+export function createApp(options: AppOptions = {}): Express {
+  const app = express();
 
-// --- Request logging ---
-app.use(morgan(env.isDevelopment ? 'dev' : 'combined'));
+  // --- Global middlewares ---
+  app.use(
+    cors({
+      origin: '*',
+    }),
+  );
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
 
-// --- API routes ---
-app.use('/api', router);
+  // --- Request logging ---
+  app.use(morgan(env.isDevelopment ? 'dev' : 'combined'));
 
-// --- 404 handler (must come after all routes) ---
-app.all('/{*splat}', notFoundHandler);
+  // --- API routes ---
+  app.use('/api', createApiRouter({ requireAuth: options.requireAuthMiddleware ?? requireAuth }));
 
-// --- Centralized error handler (must come last) ---
-app.use(globalErrorHandler);
+  // --- 404 handler (must come after all routes) ---
+  app.all('/{*splat}', notFoundHandler);
 
-export default app;
+  // --- Centralized error handler (must come last) ---
+  app.use(globalErrorHandler);
+
+  return app;
+}
+
+export default createApp();

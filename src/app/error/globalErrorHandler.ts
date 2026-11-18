@@ -5,12 +5,23 @@ import { ApiError } from './ApiError.js';
 type ErrorResponse = {
   success: boolean;
   message: string;
+  details?: unknown;
   stack?: string;
 };
 
-function resolveError(err: unknown): { statusCode: number; message: string; stack?: string } {
+function resolveError(err: unknown): {
+  statusCode: number;
+  message: string;
+  details?: unknown;
+  stack?: string;
+} {
   if (err instanceof ApiError) {
-    return { statusCode: err.statusCode, message: err.message, stack: err.stack };
+    return {
+      statusCode: err.statusCode,
+      message: err.message,
+      details: err.details,
+      stack: err.stack,
+    };
   }
 
   if (err instanceof Error) {
@@ -30,12 +41,16 @@ export const globalErrorHandler = (
   res: Response,
   _next: NextFunction,
 ): void => {
-  const { statusCode, message, stack } = resolveError(err);
+  const { statusCode, message, details, stack } = resolveError(err);
 
   const body: ErrorResponse = {
     success: false,
     message,
   };
+
+  if (details !== undefined) {
+    body.details = details;
+  }
 
   if (env.isDevelopment && stack) {
     body.stack = stack;

@@ -22,6 +22,16 @@ export interface BetterAuthUser {
   banExpires?: number | Date;
   /** PizzaHub block flag (per product requirements). */
   isBlocked?: boolean;
+
+  /* ── Additional fields (Better Auth `additionalFields`) + bookkeeping ── */
+  image?: string | null;
+  /** Vendor subscription tier — managed by admins only, never self-updatable. */
+  subscriptionPlan?: string;
+  subscriptionExpiresAt?: Date | string | null;
+  blockedReason?: string | null;
+  blockedAt?: Date | null;
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 /**

@@ -1,7 +1,7 @@
-import type { RequestHandler } from 'express';
-import { ObjectId } from 'mongodb';
+import type { Request, RequestHandler } from 'express';
 import { env } from '../config/env.js';
-import { getUsersCollection } from '../db/collections.js';
+import { findBetterAuthUserById } from '../db/collections.js';
+import { ApiError } from '../error/ApiError.js';
 import {
   AuthenticationFailure,
   buildVerifiedContext,
@@ -11,7 +11,7 @@ import {
   verifyBearerToken,
   type JwtAuthOptions,
 } from './authenticate.js';
-import type { BetterAuthUser } from './auth.types.js';
+import type { AuthenticatedUser, BetterAuthUser } from './auth.types.js';
 import { USER_ROLES, type UserRole } from '../types/common.types.js';
 
 /**
@@ -29,24 +29,19 @@ export interface UserLookupService {
 
 /**
  * Default lookup against the Better Auth `users` collection.
- * Better Auth ids are strings, but ObjectId-stored ids are tolerated.
+ * Delegates to the shared, ObjectId-tolerant data-access helper.
  */
 export const defaultUserLookup: UserLookupService = {
-  async findUserById(userId: string): Promise<BetterAuthUser | null> {
-    const users = getUsersCollection();
-
-    const asString = await users.findOne({ _id: userId });
-    if (asString) {
-      return asString;
-    }
-
-    if (/^[0-9a-f]{24}$/i.test(userId)) {
-      return users.findOne({ _id: new ObjectId(userId) });
-    }
-
-    return null;
-  },
+  findUserById: findBetterAuthUserById,
 };
+
+/** Safely extracts the DB-verified auth context (for use after requireAuth). */
+export function getAuthenticatedUser(req: Request): AuthenticatedUser {
+  if (!req.auth) {
+    throw new ApiError(401, 'Authentication required');
+  }
+  return req.auth;
+}
 
 /** Blocked = PizzaHub `isBlocked`, or Better Auth admin-plugin `banned`. */
 export function isUserBlocked(user: BetterAuthUser): boolean {

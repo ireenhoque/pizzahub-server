@@ -1,4 +1,4 @@
-import type { Collection } from 'mongodb';
+import { ObjectId, type Collection } from 'mongodb';
 import { getDatabase } from '../config/db.js';
 import type { BetterAuthUser } from '../auth/auth.types.js';
 import type { MenuItem } from '../types/menuItem.types.js';
@@ -48,4 +48,23 @@ export function getTransactionsCollection(): Collection<Transaction> {
  */
 export function getUsersCollection(): Collection<BetterAuthUser> {
   return getDatabase().collection<BetterAuthUser>(COLLECTIONS.users);
+}
+
+/**
+ * Finds a Better Auth user by id. Better Auth ids are strings by default,
+ * but ObjectId-stored ids are tolerated via a fallback lookup.
+ */
+export async function findBetterAuthUserById(userId: string): Promise<BetterAuthUser | null> {
+  const users = getUsersCollection();
+
+  const asString = await users.findOne({ _id: userId });
+  if (asString) {
+    return asString;
+  }
+
+  if (/^[0-9a-f]{24}$/i.test(userId)) {
+    return users.findOne({ _id: new ObjectId(userId) });
+  }
+
+  return null;
 }

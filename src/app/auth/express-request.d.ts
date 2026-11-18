@@ -15,6 +15,10 @@ declare global {
        * `createJwtAuthMiddleware`. Contains no DB-verified role.
        */
       jwt?: VerifiedJwtContext;
+      /** Zod-parsed query parameters, set by the `validate` middleware. */
+      validatedQuery?: unknown;
+      /** Zod-parsed path parameters, set by the `validate` middleware. */
+      validatedParams?: unknown;
     }
   }
 }

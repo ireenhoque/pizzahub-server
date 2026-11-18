@@ -1,28 +1,39 @@
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import { checkDatabaseHealth } from '../config/db.js';
 import { env } from '../config/env.js';
+import { createUserRouter } from '../modules/users/user.routes.js';
 
-const router = Router();
+export interface ApiRouterOptions {
+  /** Injectable auth middleware (tests supply a local-JWKS instance). */
+  requireAuth: RequestHandler;
+}
 
-// GET /api/health
-router.get('/health', async (_req, res) => {
-  const database = await checkDatabaseHealth();
+export function createApiRouter(options: ApiRouterOptions): Router {
+  const router = Router();
 
-  const response = {
-    success: true,
-    message: 'PizzaHub API is healthy',
-    data: {
-      server: 'ok',
-      environment: env.nodeEnv,
-      uptime: `${process.uptime().toFixed(2)}s`,
-      timestamp: new Date().toISOString(),
-      database: database.ok
-        ? ({ status: 'connected', latencyMs: database.latencyMs } as const)
-        : ({ status: 'unreachable', error: database.error ?? 'unknown' } as const),
-    },
-  };
+  // GET /api/health (public)
+  router.get('/health', async (_req, res) => {
+    const database = await checkDatabaseHealth();
 
-  res.status(database.ok ? 200 : 503).json(response);
-});
+    const response = {
+      success: true,
+      message: 'PizzaHub API is healthy',
+      data: {
+        server: 'ok',
+        environment: env.nodeEnv,
+        uptime: `${process.uptime().toFixed(2)}s`,
+        timestamp: new Date().toISOString(),
+        database: database.ok
+          ? ({ status: 'connected', latencyMs: database.latencyMs } as const)
+          : ({ status: 'unreachable', error: database.error ?? 'unknown' } as const),
+      },
+    };
 
-export default router;
+    res.status(database.ok ? 200 : 503).json(response);
+  });
+
+  // /api/users — user & profile APIs
+  router.use('/users', createUserRouter(options.requireAuth));
+
+  return router;
+}
