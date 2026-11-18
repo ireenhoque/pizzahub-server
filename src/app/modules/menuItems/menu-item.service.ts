@@ -124,7 +124,6 @@ export const menuItemService = {
     const result = await getMenuItemsCollection().insertOne(doc as MenuItem);
 
     return toPublicMenuItem({ ...doc, _id: result.insertedId } as MenuItem);
-  },
 
   /**
    * Public storefront listing — ONLY `active` items. `pending`, `rejected`,
@@ -132,12 +131,39 @@ export const menuItemService = {
    * status filter, so no review-state item can ever leak into public
    * results.
    */
+  // Public storefront listing — ONLY `active` and `isAvailable` items with advanced filtering & sorting.
   async listPublicMenuItems(query: PublicListMenuItemsQuery): Promise<ListMenuItemsResult> {
-    return paginateMenuItems(
-      buildSearchFilter({ status: 'active' }, query.search, query.category),
-      query,
-    );
-  },
+    // Base filter ensures only approved & available items are shown.
+    const baseFilter: Filter<MenuItem> = { status: 'active', isAvailable: true } as any;
+
+    // Category filter.
+    if (query.category) {
+      baseFilter.category = query.category;
+    }
+
+    // Location filter – case‑insensitive partial match.
+    if (query.location) {
+      baseFilter.location = { $regex: escapeRegex(query.location), $options: 'i' } as any;
+    }
+
+    // Price range filter.
+    if (query.minPrice !== undefined || query.maxPrice !== undefined) {
+      const priceFilter: any = {};
+      if (query.minPrice !== undefined) priceFilter.$gte = query.minPrice;
+      if (query.maxPrice !== undefined) priceFilter.$lte = query.maxPrice;
+      baseFilter.price = priceFilter;
+    }
+
+    // Apply name/description search (adds $or clause).
+    const filterWithSearch = buildSearchFilter(baseFilter, query.search, query.category);
+
+    // Sorting – use requested field and order; default fallback handled in paginateMenuItems.
+    const sortSpec: Record<string, 1 | -1> = {
+      [query.sortBy]: query.sortOrder === 'asc' ? 1 : -1,
+    };
+
+    return paginateMenuItems(filterWithSearch, query, sortSpec);
+
 
   /** Vendor listing — own items only, every status, optional status filter. */
   async listVendorMenuItems(
@@ -149,7 +175,6 @@ export const menuItemService = {
       filter.status = query.status;
     }
     return paginateMenuItems(filter, query);
-  },
 
   /** Admin listing — every item, filterable by status/vendor/category/search. */
   async listAllMenuItemsForAdmin(query: AdminListMenuItemsQuery): Promise<ListMenuItemsResult> {
@@ -161,7 +186,6 @@ export const menuItemService = {
       filter.vendorId = query.vendorId;
     }
     return paginateMenuItems(buildSearchFilter(filter, query.search, query.category), query);
-  },
 
   /**
    * Role-aware detail lookup.
@@ -194,7 +218,6 @@ export const menuItemService = {
     }
 
     return toPublicMenuItem(item);
-  },
 
   /**
    * Vendor update of THEIR OWN item. Ownership is verified from the DB
@@ -230,7 +253,6 @@ export const menuItemService = {
       throw new ApiError(404, 'Menu item not found');
     }
     return toPublicMenuItem(updated);
-  },
 
   /**
    * Vendor delete of THEIR OWN item (hard delete). Ownership verified from
@@ -247,7 +269,6 @@ export const menuItemService = {
 
     await items.deleteOne({ _id: item._id });
     return toPublicMenuItem(item);
-  },
 
   /**
    * Admin status management (approve → 'active', reject → 'rejected',
@@ -274,7 +295,6 @@ export const menuItemService = {
       throw new ApiError(404, 'Menu item not found');
     }
     return toPublicMenuItem(updated);
-  },
 };
 
 /** Validates a route id as a Mongo ObjectId (invalid ids → 400 ApiError). */
@@ -309,17 +329,19 @@ function buildSearchFilter(
 async function paginateMenuItems(
   filter: Filter<MenuItem>,
   query: { page: number; limit: number },
+  sortSpec?: Record<string, 1 | -1>,
 ): Promise<ListMenuItemsResult> {
   const items = getMenuItemsCollection();
   const total = await items.countDocuments(filter);
   const skip = (query.page - 1) * query.limit;
 
-  const docs = await items
+  const cursor = items
     .find(filter)
-    .sort({ createdAt: -1, _id: 1 })
+    .sort(sortSpec ?? { createdAt: -1, _id: 1 })
     .skip(skip)
-    .limit(query.limit)
-    .toArray();
+    .limit(query.limit);
+
+  const docs = await cursor.toArray();
 
   return {
     items: docs.map(toPublicMenuItem),
@@ -328,6 +350,5 @@ async function paginateMenuItems(
       limit: query.limit,
       total,
       totalPages: Math.max(1, Math.ceil(total / query.limit)),
-    },
-  };
+    };
 }

@@ -59,6 +59,11 @@ export interface PublicListMenuItemsQuery {
   limit: number;
   category?: MenuItemCategory;
   search?: string;
+  location?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  sortBy: 'price' | 'ratingAvg' | 'createdAt';
+  sortOrder: 'asc' | 'desc';
 }
 
 /** Vendor listing query — own items, all statuses, optional status filter. */

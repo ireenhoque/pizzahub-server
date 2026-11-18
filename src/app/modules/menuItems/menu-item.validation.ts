@@ -48,12 +48,35 @@ const categoryShape = {
   category: z.enum(MENU_ITEM_CATEGORIES).optional(),
 } as const;
 
+/** Whitelisted sortable fields — anything else is rejected (never interpolated). */
+export const MENU_ITEM_SORT_FIELDS = ['price', 'ratingAvg', 'createdAt'] as const;
+export type MenuItemSortField = (typeof MENU_ITEM_SORT_FIELDS)[number];
+
 /** GET /api/menu-items — public storefront listing. */
-export const publicListMenuItemsQuerySchema = z.strictObject({
-  ...paginationShape,
-  ...categoryShape,
-  ...searchShape,
-});
+export const publicListMenuItemsQuerySchema = z
+  .strictObject({
+    ...paginationShape,
+    ...categoryShape,
+    ...searchShape,
+    /** Case-insensitive partial match on the item's outlet/delivery area. */
+    location: z.string().trim().min(1).max(200).optional(),
+    minPrice: z.coerce
+      .number()
+      .min(0, 'minPrice cannot be negative')
+      .max(10_000_000, 'minPrice is unreasonably high')
+      .optional(),
+    maxPrice: z.coerce
+      .number()
+      .min(0, 'maxPrice cannot be negative')
+      .max(10_000_000, 'maxPrice is unreasonably high')
+      .optional(),
+    sortBy: z.enum(MENU_ITEM_SORT_FIELDS).default('createdAt'),
+    sortOrder: z.enum(['asc', 'desc']).default('desc'),
+  })
+  .refine((query) => query.minPrice === undefined || query.maxPrice === undefined || query.minPrice <= query.maxPrice, {
+    message: 'minPrice cannot exceed maxPrice',
+    path: ['minPrice'],
+  });
 
 /** GET /api/menu-items/mine — vendor's own items, optional status filter. */
 export const vendorListMenuItemsQuerySchema = z.strictObject({
