@@ -1,5 +1,6 @@
 import type { Collection } from 'mongodb';
 import { getDatabase } from '../config/db.js';
+import type { BetterAuthUser } from '../auth/auth.types.js';
 import type { MenuItem } from '../types/menuItem.types.js';
 import type { Order } from '../types/order.types.js';
 import type { Transaction } from '../types/transaction.types.js';
@@ -36,4 +37,15 @@ export function getOrdersCollection(): Collection<Order> {
 
 export function getTransactionsCollection(): Collection<Transaction> {
   return getDatabase().collection<Transaction>(COLLECTIONS.transactions);
+}
+
+/**
+ * Typed accessor for the Better Auth-managed `users` collection.
+ *
+ * STRICTLY READ-ONLY: Better Auth owns the schema, data and indexes.
+ * PizzaHub reads the current user (role + block status) on protected
+ * requests and nothing else.
+ */
+export function getUsersCollection(): Collection<BetterAuthUser> {
+  return getDatabase().collection<BetterAuthUser>(COLLECTIONS.users);
 }

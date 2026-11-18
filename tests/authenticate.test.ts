@@ -2,7 +2,7 @@ import { createServer, type AddressInfo, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { exportJWK, generateKeyPair, SignJWT, type JWK } from 'jose';
 import { createJwtAuthMiddleware } from '../src/app/auth/authenticate.js';
-import type { AuthenticatedUser } from '../src/app/auth/auth.types.js';
+import type { VerifiedJwtContext } from '../src/app/auth/auth.types.js';
 import type { Request, Response } from 'express';
 
 const ISSUER = 'https://auth.pizzahub.test';
@@ -131,14 +131,16 @@ describe('Better Auth JWT authentication middleware', () => {
     expect(result.next).toHaveBeenCalledOnce();
     expect(result.res.status).not.toHaveBeenCalled();
 
-    const auth = (result.req as Request & { auth?: AuthenticatedUser }).auth;
-    expect(auth).toBeDefined();
-    expect(auth?.userId).toBe(USER_ID);
-    expect(auth?.issuer).toBe(ISSUER);
-    expect(auth?.audience).toBe(AUDIENCE);
-    expect(auth?.email).toBe('user@example.com');
-    expect(auth?.emailVerified).toBe(true);
-    expect(auth?.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    const jwt = (result.req as Request & { jwt?: VerifiedJwtContext }).jwt;
+    expect(jwt).toBeDefined();
+    expect(jwt?.userId).toBe(USER_ID);
+    expect(jwt?.issuer).toBe(ISSUER);
+    expect(jwt?.audience).toBe(AUDIENCE);
+    expect(jwt?.email).toBe('user@example.com');
+    expect(jwt?.emailVerified).toBe(true);
+    expect(jwt?.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    // Token-only middleware never sets the DB-backed context.
+    expect((result.req as Request & { auth?: unknown }).auth).toBeUndefined();
   });
 
   // ── missing / malformed ──────────────────────────────────────────────
@@ -209,7 +211,7 @@ describe('Better Auth JWT authentication middleware', () => {
 
     const result = await call(`Bearer ${rotatedToken}`);
     expect(result.next).toHaveBeenCalledOnce();
-    const auth = (result.req as Request & { auth?: AuthenticatedUser }).auth;
-    expect(auth?.userId).toBe(USER_ID);
+    const jwt = (result.req as Request & { jwt?: VerifiedJwtContext }).jwt;
+    expect(jwt?.userId).toBe(USER_ID);
   });
 });
