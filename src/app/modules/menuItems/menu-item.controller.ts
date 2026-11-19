@@ -35,7 +35,11 @@ export function createMenuItemControllers(options: MenuItemControllerOptions) {
           { buffer: file.buffer, originalname: file.originalname, mimetype: file.mimetype },
           options.uploadImage,
         );
-        res.status(201).json({ success: true, message: 'Menu item created and submitted for approval', data: { menuItem } });
+        res.status(201).json({
+          success: true,
+          message: 'Menu item created and submitted for approval',
+          data: { menuItem },
+        });
       } catch (error) {
         next(error);
       }
@@ -45,7 +49,6 @@ export function createMenuItemControllers(options: MenuItemControllerOptions) {
 
 /** Admin moderation controllers */
 export const adminMenuItemControllers = {
-
   /** PATCH /api/menu-items/admin/:id/approve — approve a pending menu item. */
   approveMenuItem: (async (req, res, next) => {
     try {
@@ -147,7 +150,9 @@ export const setMenuItemStatus: RequestHandler = async (req, res, next) => {
     const { id } = req.validatedParams as { id: string };
     const { status } = req.body as { status: MenuItemStatus };
     const menuItem = await menuItemService.setMenuItemStatus(id, status);
-    res.status(200).json({ success: true, message: 'Menu item status updated', data: { menuItem } });
+    res
+      .status(200)
+      .json({ success: true, message: 'Menu item status updated', data: { menuItem } });
   } catch (error) {
     next(error);
   }

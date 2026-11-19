@@ -73,10 +73,16 @@ export const publicListMenuItemsQuerySchema = z
     sortBy: z.enum(MENU_ITEM_SORT_FIELDS).default('createdAt'),
     sortOrder: z.enum(['asc', 'desc']).default('desc'),
   })
-  .refine((query) => query.minPrice === undefined || query.maxPrice === undefined || query.minPrice <= query.maxPrice, {
-    message: 'minPrice cannot exceed maxPrice',
-    path: ['minPrice'],
-  });
+  .refine(
+    (query) =>
+      query.minPrice === undefined ||
+      query.maxPrice === undefined ||
+      query.minPrice <= query.maxPrice,
+    {
+      message: 'minPrice cannot exceed maxPrice',
+      path: ['minPrice'],
+    },
+  );
 
 /** GET /api/menu-items/mine — vendor's own items, optional status filter. */
 export const vendorListMenuItemsQuerySchema = z.strictObject({

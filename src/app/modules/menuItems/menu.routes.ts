@@ -2,7 +2,17 @@ import { Router, type RequestHandler } from 'express';
 import { optionalAuth, requireAdmin, requireVendor } from '../../auth/require-auth.js';
 import { uploadSingleImage } from '../../middlewares/upload.js';
 import { validate } from '../../middlewares/validate.js';
-import { adminMenuItemControllers, createMenuItemControllers, listPublicMenuItems, listMyMenuItems, updateMyMenuItem, deleteMyMenuItem, listAllMenuItems, setMenuItemStatus, getMenuItem } from './menu-item.controller.js';
+import {
+  adminMenuItemControllers,
+  createMenuItemControllers,
+  listPublicMenuItems,
+  listMyMenuItems,
+  updateMyMenuItem,
+  deleteMyMenuItem,
+  listAllMenuItems,
+  setMenuItemStatus,
+  getMenuItem,
+} from './menu-item.controller.js';
 
 const menuItemControllers = {
   listPublicMenuItems,
@@ -93,7 +103,6 @@ export function createMenuRouter(
 
   // ── Admin pending menu items ────────────────────────────────────────
 
-
   // ── Admin approve / reject actions ────────────────────────────────────────
   router.patch(
     '/admin/:id/approve',
@@ -110,7 +119,6 @@ export function createMenuRouter(
     validate({ params: menuItemIdParamSchema }),
     adminMenuItemControllers.rejectMenuItem,
   );
-
 
   // ── Admin review & management ────────────────────────────────────────
   router.get(

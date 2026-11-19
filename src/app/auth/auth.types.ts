@@ -25,9 +25,22 @@ export interface BetterAuthUser {
 
   /* ── Additional fields (Better Auth `additionalFields`) + bookkeeping ── */
   image?: string | null;
-  /** Vendor subscription tier — managed by admins only, never self-updatable. */
+  /**
+   * Vendor subscription tier. Written ONLY by trusted server-side code paths
+   * (admin endpoints and the verified Stripe webhook) — never accepted from
+   * any client request.
+   */
   subscriptionPlan?: string;
   subscriptionExpiresAt?: Date | string | null;
+  /** Stripe customer id (cus_…) saved server-side by the Premium checkout flow. */
+  stripeCustomerId?: string;
+  /** Stripe subscription id (sub_…) for Premium — written by verified webhooks only. */
+  stripeSubscriptionId?: string;
+  /**
+   * The Premium Checkout session the vendor currently has open. Reusing it
+   * prevents duplicate sessions (and therefore duplicate subscriptions).
+   */
+  stripePendingCheckout?: { sessionId: string; url: string; createdAt: Date };
   blockedReason?: string | null;
   blockedAt?: Date | null;
   createdAt?: Date;

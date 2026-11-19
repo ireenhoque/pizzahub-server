@@ -21,6 +21,34 @@ function readRequiredUrlEnv(key: string): string {
 }
 
 const nodeEnv = readRequiredEnv('NODE_ENV');
+export function getStripeWebhookSecret(): string {
+  return readRequiredEnv('STRIPE_WEBHOOK_SECRET');
+}
+
+/*
+ * Stripe billing settings are validated LAZILY, exactly like the webhook
+ * secret above: the server boots and every non-billing endpoint keeps
+ * working even when Stripe is not configured. Billing endpoints map a
+ * missing variable to a 503 that names the variable — never its value.
+ */
+export function getStripeSecretKey(): string {
+  return readRequiredEnv('STRIPE_SECRET_KEY');
+}
+
+/** Server-controlled Stripe Price for the vendor Premium plan (clients never send prices). */
+export function getStripePremiumPriceId(): string {
+  return readRequiredEnv('STRIPE_PREMIUM_PRICE_ID');
+}
+
+/** Configured browser URLs for Checkout success / cancellation. */
+export function getStripeSuccessUrl(): string {
+  return readRequiredUrlEnv('STRIPE_SUCCESS_URL');
+}
+
+export function getStripeCancelUrl(): string {
+  return readRequiredUrlEnv('STRIPE_CANCEL_URL');
+}
+
 const port = Number.parseInt(readRequiredEnv('PORT'), 10);
 const mongoUri = readRequiredEnv('MONGODB_URI');
 const dbName = readRequiredEnv('DB_NAME');

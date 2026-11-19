@@ -8,6 +8,7 @@ import { globalErrorHandler } from './app/error/globalErrorHandler.js';
 import { notFoundHandler } from './app/error/notFoundHandler.js';
 import { createApiRouter } from './app/routes/index.js';
 import type { UploadImageFn } from './app/modules/menuItems/menu-item.types.js';
+import type { StripeBillingGateway } from './app/modules/subscriptions/stripe.client.js';
 
 export interface AppOptions {
   /**
@@ -17,6 +18,8 @@ export interface AppOptions {
   requireAuthMiddleware?: typeof requireAuth;
   /** Injectable image uploader — defaults to ImgBB. Tests inject fakes. */
   uploadImage?: UploadImageFn;
+  /** Injectable Stripe gateway — defaults to the real Stripe SDK. Tests inject fakes. */
+  stripeGateway?: StripeBillingGateway;
 }
 
 export function createApp(options: AppOptions = {}): Express {
@@ -28,6 +31,12 @@ export function createApp(options: AppOptions = {}): Express {
       origin: '*',
     }),
   );
+  // Stripe webhooks are verified against the RAW request bytes (Stripe-
+  // Signature HMAC). This path-level raw parser MUST be registered before
+  // express.json(): once a body parser has consumed the stream and set
+  // req.body to a parsed object, the original bytes are gone and signature
+  // verification can no longer be done correctly.
+  app.use('/api/stripe/webhook', express.raw({ type: 'application/json' }));
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
@@ -40,6 +49,7 @@ export function createApp(options: AppOptions = {}): Express {
     createApiRouter({
       requireAuth: options.requireAuthMiddleware ?? requireAuth,
       uploadImage: options.uploadImage,
+      stripeGateway: options.stripeGateway,
     }),
   );
 

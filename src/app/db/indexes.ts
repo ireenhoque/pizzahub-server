@@ -1,5 +1,6 @@
 import type { Db, IndexOptions, IndexSpecification } from 'mongodb';
 import { COLLECTIONS } from './collections.js';
+import { WEBHOOK_EVENTS_COLLECTION } from './webhookEvents.collection.js';
 
 /**
  * All business indexes in one place, each with a comment explaining WHY it
@@ -78,7 +79,14 @@ export const INDEX_DEFINITIONS: IndexDefinition[] = [
     keys: { stripeSessionId: 1 },
     options: { name: 'uniq_stripeSessionId', unique: true },
     description:
-      'Idempotency guarantee: one Stripe Checkout session maps to EXACTLY one transaction. Duplicate webhook deliveries or retried writes are rejected by the unique index instead of creating duplicate financial records.',
+      'Idempotency guarantee: one Stripe Checkout session (or, for recurring Premium renewals, one Stripe Invoice) maps to EXACTLY one transaction. Duplicate webhook deliveries or retried writes are rejected by the unique index instead of creating duplicate financial records.',
+  },
+  {
+    collection: COLLECTIONS.transactions,
+    keys: { stripeEventId: 1 },
+    options: { name: 'uniq_stripeEventId', unique: true, sparse: true },
+    description:
+      'Second idempotency layer: one Stripe Event can create at most ONE financial record. Sparse, so documents without a Stripe event id are unaffected.',
   },
   {
     collection: COLLECTIONS.transactions,
@@ -91,6 +99,15 @@ export const INDEX_DEFINITIONS: IndexDefinition[] = [
     keys: { orderId: 1 },
     options: { name: 'idx_orderId' },
     description: 'Resolve the full payment lifecycle of an order (its payment plus any refunds).',
+  },
+
+  // ─────────────── transactionsEvents (Stripe webhook lifecycle) ───────────────
+  {
+    collection: WEBHOOK_EVENTS_COLLECTION,
+    keys: { stripeEventId: 1 },
+    options: { name: 'uniq_stripeEventId', unique: true },
+    description:
+      'Webhook idempotency: each Stripe Event ID exists at most once, so concurrent or retried deliveries of the same event cannot process it twice. The document is inserted with status "processing" as the claim.',
   },
 ];
 

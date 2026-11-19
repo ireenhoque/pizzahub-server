@@ -126,7 +126,6 @@ export const menuItemService = {
     return toPublicMenuItem({ ...doc, _id: result.insertedId } as MenuItem);
   },
 
-
   /**
    * Public storefront listing — ONLY `active` items. `pending`, `rejected`,
    * `inactive` and `out_of_stock` documents are structurally excluded by the
@@ -136,7 +135,7 @@ export const menuItemService = {
   // Public storefront listing — ONLY `active` and `isAvailable` items with advanced filtering & sorting.
   listPublicMenuItems: async (query: PublicListMenuItemsQuery): Promise<ListMenuItemsResult> => {
     // Base filter ensures only approved & available items are shown.
-    const baseFilter: Filter<MenuItem> = { status: 'active', isAvailable: true } as any;
+    const baseFilter: Filter<MenuItem> = { status: 'active', isAvailable: true };
 
     // Category filter.
     if (query.category) {
@@ -145,12 +144,12 @@ export const menuItemService = {
 
     // Location filter – case‑insensitive partial match.
     if (query.location) {
-      baseFilter.location = { $regex: escapeRegex(query.location), $options: 'i' } as any;
+      baseFilter.location = { $regex: escapeRegex(query.location), $options: 'i' };
     }
 
     // Price range filter.
     if (query.minPrice !== undefined || query.maxPrice !== undefined) {
-      const priceFilter: any = {};
+      const priceFilter: { $gte?: number; $lte?: number } = {};
       if (query.minPrice !== undefined) priceFilter.$gte = query.minPrice;
       if (query.maxPrice !== undefined) priceFilter.$lte = query.maxPrice;
       baseFilter.price = priceFilter;
@@ -176,6 +175,7 @@ export const menuItemService = {
       filter.status = query.status;
     }
     return paginateMenuItems(filter, query);
+  },
 
   /** Admin listing — every item, filterable by status/vendor/category/search. */
   async listAllMenuItemsForAdmin(query: AdminListMenuItemsQuery): Promise<ListMenuItemsResult> {
@@ -187,6 +187,7 @@ export const menuItemService = {
       filter.vendorId = query.vendorId;
     }
     return paginateMenuItems(buildSearchFilter(filter, query.search, query.category), query);
+  },
 
   /**
    * Role-aware detail lookup.
@@ -219,6 +220,7 @@ export const menuItemService = {
     }
 
     return toPublicMenuItem(item);
+  },
 
   /**
    * Vendor update of THEIR OWN item. Ownership is verified from the DB
@@ -254,6 +256,7 @@ export const menuItemService = {
       throw new ApiError(404, 'Menu item not found');
     }
     return toPublicMenuItem(updated);
+  },
 
   /**
    * Vendor delete of THEIR OWN item (hard delete). Ownership verified from
@@ -270,6 +273,7 @@ export const menuItemService = {
 
     await items.deleteOne({ _id: item._id });
     return toPublicMenuItem(item);
+  },
 
   /**
    * Admin status management (approve → 'active', reject → 'rejected',
@@ -296,6 +300,7 @@ export const menuItemService = {
       throw new ApiError(404, 'Menu item not found');
     }
     return toPublicMenuItem(updated);
+  },
 };
 
 /** Validates a route id as a Mongo ObjectId (invalid ids → 400 ApiError). */
@@ -351,5 +356,6 @@ async function paginateMenuItems(
       limit: query.limit,
       total,
       totalPages: Math.max(1, Math.ceil(total / query.limit)),
-    };
+    },
+  };
 }
