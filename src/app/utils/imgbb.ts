@@ -17,13 +17,17 @@ export async function uploadToImgBB(file: {
   mimetype: string;
 }): Promise<UploadedImage> {
   const form = new FormData();
-  // ImgBB accepts base64 image payloads.
+  // ImgBB accepts base64 image payloads in multipart/form-data.
   form.append('image', file.buffer.toString('base64'));
-  form.append('key', env.imgbbApiKey);
+  form.append('name', file.originalname);
+
+  // ImgBB requires the API key as a query parameter, not a form field.
+  const uploadUrl = new URL(env.imgbbUploadUrl);
+  uploadUrl.searchParams.set('key', env.imgbbApiKey);
 
   let response: Response;
   try {
-    response = await fetch(env.imgbbUploadUrl, {
+    response = await fetch(uploadUrl, {
       method: 'POST',
       body: form,
       signal: AbortSignal.timeout(15_000),
