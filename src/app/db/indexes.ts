@@ -100,6 +100,13 @@ export const INDEX_DEFINITIONS: IndexDefinition[] = [
     options: { name: 'idx_orderId' },
     description: 'Resolve the full payment lifecycle of an order (its payment plus any refunds).',
   },
+  {
+    collection: COLLECTIONS.transactions,
+    keys: { createdAt: -1, _id: 1 },
+    options: { name: 'idx_createdAt_desc' },
+    description:
+      'Admin transaction listing: supports newest-first pagination, date-range filtering on createdAt, and stable ordering as a tiebreaker.',
+  },
 
   // ─────────────── transactionsEvents (Stripe webhook lifecycle) ───────────────
   {

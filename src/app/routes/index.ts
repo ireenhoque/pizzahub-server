@@ -1,9 +1,10 @@
-import { Router, type RequestHandler } from 'express';
+﻿import { Router, type RequestHandler } from 'express';
 import { checkDatabaseHealth } from '../config/db.js';
 import { env } from '../config/env.js';
 import { createUserRouter } from '../modules/users/user.routes.js';
 import { createOrderRouter } from '../modules/orders/order.routes.js';
 import { createMenuRouter } from '../modules/menuItems/menu.routes.js';
+import { createTransactionRouter } from '../modules/transactions/transaction.routes.js';
 import {
   createStripeWebhookRouter,
   createSubscriptionRouter,
@@ -50,10 +51,10 @@ export function createApiRouter(options: ApiRouterOptions): Router {
     res.status(database.ok ? 200 : 503).json(response);
   });
 
-  // /api/users — user & profile APIs
+  // /api/users 窶・user & profile APIs
   router.use('/users', createUserRouter(options.requireAuth));
 
-  // /api/orders — order APIs
+  // /api/orders 窶・order APIs
   router.use('/orders', createOrderRouter(options.requireAuth));
 
   router.use(
@@ -61,10 +62,12 @@ export function createApiRouter(options: ApiRouterOptions): Router {
     createMenuRouter(options.requireAuth, { uploadImage: options.uploadImage }),
   );
 
-  // /api/subscriptions — vendor Premium subscription management
+  // /api/transactions - admin-only transaction history
+  router.use('/transactions', createTransactionRouter(options.requireAuth));
+  // /api/subscriptions 窶・vendor Premium subscription management
   router.use('/subscriptions', createSubscriptionRouter(options.requireAuth, stripeGateway));
 
-  // /api/stripe/webhook — Stripe events (HMAC-secured; raw body registered
+  // /api/stripe/webhook 窶・Stripe events (HMAC-secured; raw body registered
   // in app.ts before express.json()).
   router.use('/stripe/webhook', createStripeWebhookRouter(stripeGateway));
 
