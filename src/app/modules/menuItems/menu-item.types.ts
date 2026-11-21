@@ -15,6 +15,8 @@ export interface PublicMenuItem {
   imageThumbUrl?: string | null;
   status: MenuItemStatus;
   isAvailable: boolean;
+  /** Server-derived vendor Premium status; no private vendor fields are exposed. */
+  isPremium: boolean;
   ratingAvg: number;
   ratingCount: number;
   createdAt?: Date;

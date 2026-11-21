@@ -37,6 +37,18 @@ export interface BetterAuthUser {
   /** Stripe subscription id (sub_…) for Premium — written by verified webhooks only. */
   stripeSubscriptionId?: string;
   /**
+   * Ordering watermark for verified Stripe lifecycle events. Optional so all
+   * existing/legacy user documents remain valid. `eventCreated` and
+   * `periodEnd` are Stripe epoch seconds, not milliseconds.
+   */
+  subscriptionLifecycle?: {
+    stripeSubscriptionId: string;
+    status: string;
+    eventCreated: number;
+    periodEnd?: number;
+    sourceEventId?: string;
+  };
+  /**
    * The Premium Checkout session the vendor currently has open. Reusing it
    * prevents duplicate sessions (and therefore duplicate subscriptions).
    */

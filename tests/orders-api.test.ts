@@ -55,6 +55,7 @@ describe('Order APIs (authentication, authorization, validation, transitions)', 
   let itemA1 = '';
   let itemA2 = '';
   let itemB1 = '';
+  let itemUnavailable = '';
   let orderPlaced = '';
   let orderDelivered = '';
   let orderCancelled = '';
@@ -166,10 +167,12 @@ describe('Order APIs (authentication, authorization, validation, transitions)', 
       menuItem(ids.vendA, `UITEST-${runId} Item A1`, 10),
       menuItem(ids.vendA, `UITEST-${runId} Item A2`, 15),
       menuItem(ids.vendB, `UITEST-${runId} Item B1`, 20),
+      { ...menuItem(ids.vendA, `UITEST-${runId} Item Unavailable`, 5), isAvailable: false },
     ]);
     itemA1 = String(inserted.insertedIds[0]);
     itemA2 = String(inserted.insertedIds[1]);
     itemB1 = String(inserted.insertedIds[2]);
+    itemUnavailable = String(inserted.insertedIds[3]);
 
     // ── Seed orders in three lifecycle states ───────────────────────────
     function seedOrder(
@@ -313,6 +316,37 @@ describe('Order APIs (authentication, authorization, validation, transitions)', 
     expect(order.subtotal).toBe(40); // 20 × 2
     expect(order.totalAmount).toBe(order.subtotal + order.deliveryFee);
     expect(order.lineItems).toHaveLength(1);
+  });
+
+  it('allows a repeat order even when an earlier order for the item is still in flight', async () => {
+    // cust1 already has a seeded `placed` order containing itemA1. That must
+    // not prevent a legitimate second order for the same available item.
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${await tokenFor(ids.cust1)}`)
+      .send({
+        lineItems: [{ menuItemId: itemA1, quantity: 2 }],
+        deliveryAddress: '14 Repeat Order Street, Dhaka',
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.order.status).toBe('placed');
+    expect(res.body.data.order.lineItems).toHaveLength(1);
+    expect(res.body.data.order.lineItems[0].menuItemId).toBe(itemA1);
+    expect(res.body.data.order.subtotal).toBe(20);
+  });
+
+  it('still rejects unavailable menu items at order creation', async () => {
+    const res = await request(app)
+      .post('/api/orders')
+      .set('Authorization', `Bearer ${await tokenFor(ids.cust1)}`)
+      .send({
+        lineItems: [{ menuItemId: itemUnavailable, quantity: 1 }],
+        deliveryAddress: '15 Unavailable Lane, Dhaka',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toBe('Menu item is not available for ordering');
   });
 
   it('rejects a cart that mixes vendors with 400 (vendorId is never guessed)', async () => {

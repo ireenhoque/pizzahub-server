@@ -17,6 +17,8 @@ export interface WebhookEventDocument {
   stripeEventId: string;
   /** Stripe event type (e.g. `invoice.paid`). Absent on legacy records. */
   eventType?: string;
+  /** Stripe event time (epoch seconds), used for ordering audits. */
+  eventCreated?: number;
   status: WebhookEventStatus;
   receivedAt: Date;
   /** Set when the event reaches `processed` (audit). */

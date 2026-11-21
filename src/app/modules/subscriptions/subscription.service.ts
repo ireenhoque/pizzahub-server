@@ -1,5 +1,7 @@
 import { ApiError } from '../../error/ApiError.js';
 import { findBetterAuthUserById, getUsersCollection } from '../../db/collections.js';
+import { runInTransaction } from '../../db/transactions.js';
+import { enforceFreePlanActiveLimitInSession } from '../menuItems/free-plan-limit.js';
 import { normalizeRoles } from '../../auth/require-auth.js';
 import {
   getStripeCancelUrl,
@@ -165,10 +167,41 @@ export function createSubscriptionService(gateway: StripeBillingGateway) {
         throw new ApiError(502, 'Stripe rejected the cancellation — please retry');
       });
 
-      await getUsersCollection().updateOne(
-        { _id: vendor._id },
-        { $set: { subscriptionPlan: 'free', subscriptionExpiresAt: null, updatedAt: new Date() } },
-      );
+      // The local downgrade and free-plan reconciliation commit together.
+      // The terminal lifecycle watermark stops an older paid/renewal webhook
+      // from reactivating this vendor after cancellation.
+      await runInTransaction(async (session) => {
+        const now = new Date();
+        const expiresAt = vendor.subscriptionExpiresAt;
+        const expiryMs =
+          expiresAt === undefined || expiresAt === null
+            ? null
+            : typeof expiresAt === 'string'
+              ? Date.parse(expiresAt)
+              : expiresAt.getTime();
+
+        await getUsersCollection().updateOne(
+          { _id: vendor._id },
+          {
+            $set: {
+              subscriptionPlan: 'free',
+              subscriptionExpiresAt: null,
+              updatedAt: now,
+              subscriptionLifecycle: {
+                stripeSubscriptionId: vendor.stripeSubscriptionId!,
+                status: 'canceled',
+                eventCreated: Math.floor(now.getTime() / 1000),
+                ...(expiryMs !== null && !Number.isNaN(expiryMs)
+                  ? { periodEnd: Math.floor(expiryMs / 1000) }
+                  : {}),
+                sourceEventId: `cancel_endpoint_${vendor.stripeSubscriptionId}`,
+              },
+            },
+          },
+          { session },
+        );
+        await enforceFreePlanActiveLimitInSession(String(vendor._id), session);
+      });
 
       const updated = await findBetterAuthUserById(auth.userId);
       if (!updated) {

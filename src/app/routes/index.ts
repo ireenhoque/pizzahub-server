@@ -1,6 +1,7 @@
 ﻿import { Router, type RequestHandler } from 'express';
 import { checkDatabaseHealth } from '../config/db.js';
 import { env } from '../config/env.js';
+import { createAdminRouter } from '../modules/admin/admin.routes.js';
 import { createUserRouter } from '../modules/users/user.routes.js';
 import { createOrderRouter } from '../modules/orders/order.routes.js';
 import { createMenuRouter } from '../modules/menuItems/menu.routes.js';
@@ -61,6 +62,9 @@ export function createApiRouter(options: ApiRouterOptions): Router {
     '/menu-items',
     createMenuRouter(options.requireAuth, { uploadImage: options.uploadImage }),
   );
+
+  // /api/admin - admin-only overview statistics
+  router.use('/admin', createAdminRouter(options.requireAuth));
 
   // /api/transactions - admin-only transaction history
   router.use('/transactions', createTransactionRouter(options.requireAuth));

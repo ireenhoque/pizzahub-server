@@ -2,7 +2,8 @@ import type { Server } from 'http';
 import app from './app.js';
 import { connectDatabase, disconnectDatabase } from './app/config/db.js';
 import { env } from './app/config/env.js';
-import { ensureIndexes } from './app/db/indexes.js';
+import { ensureRequiredIndexes } from './app/db/indexes.js';
+import { enforceExpiredPremiumMenuLimits } from './app/modules/menuItems/free-plan-limit.js';
 
 let server: Server | null = null;
 
@@ -48,13 +49,22 @@ process.on('SIGINT', () => shutdown(0, '🛑 SIGINT received, shutting down grac
 
 connectDatabase()
   .then(async (db) => {
-    // Safe + repeatable: identical index definitions are no-ops, and
-    // collections that do not exist yet are skipped so startup never
-    // implicitly creates empty business collections.
-    await ensureIndexes(db);
+    // Creates and verifies the Stripe idempotency indexes before any request
+    // can be accepted. Optional indexes on missing collections stay skipped.
+    await ensureRequiredIndexes(db);
+
+    // Expiry is time-based (no scheduler), so reconcile already-lapsed premium
+    // vendors at boot as well. No documents are deleted; excess active items
+    // are moved to the existing `inactive` state.
+    await enforceExpiredPremiumMenuLimits();
+
     startServer();
   })
-  .catch(() => {
-    console.error('❌ Failed to start PizzaHub server because the database is unreachable');
+  .catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    // Only surface bootstrap messages we control; a raw Mongo error could
+    // contain connection-string credentials.
+    const safeMessage = message.startsWith('Required') ? message : 'Database bootstrap failed';
+    console.error(`❌ Failed to start PizzaHub server: ${safeMessage}`);
     process.exit(1);
   });

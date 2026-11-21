@@ -7,7 +7,11 @@ import type { Express } from 'express';
 import Stripe from 'stripe';
 import { connectDatabase, disconnectDatabase, getDatabase } from '../src/app/config/db.js';
 import { ensureIndexes } from '../src/app/db/indexes.js';
-import { getTransactionsCollection, getUsersCollection } from '../src/app/db/collections.js';
+import {
+  getMenuItemsCollection,
+  getTransactionsCollection,
+  getUsersCollection,
+} from '../src/app/db/collections.js';
 import { getWebhookEventsCollection } from '../src/app/db/webhookEvents.collection.js';
 import { createRequireAuth } from '../src/app/auth/require-auth.js';
 import { createApp } from '../src/app.js';
@@ -80,6 +84,9 @@ describe('Stripe vendor Premium subscriptions', () => {
   const signedIn = new Map<string, string>();
 
   const day = 86_400_000;
+  const testNow = Date.now();
+  const nowSeconds = Math.floor(testNow / 1000);
+  const plus = (days: number) => Math.floor((testNow + days * day) / 1000);
   const ids = {
     cust1: `uitest-${runId}-sub-cust`,
     checkout: `uitest-${runId}-sub-checkout`,
@@ -95,6 +102,11 @@ describe('Stripe vendor Premium subscriptions', () => {
     cancelFail: `uitest-${runId}-sub-cancelfail`,
     freeFail: `uitest-${runId}-sub-freefail`,
     expireme: `uitest-${runId}-sub-expire`,
+    ordering: `uitest-${runId}-sub-ordering`,
+    staleDelete: `uitest-${runId}-sub-staledelete`,
+    lateCheckout: `uitest-${runId}-sub-latecheckout`,
+    failedTxn: `uitest-${runId}-sub-failedtxn`,
+    legacyStale: `uitest-${runId}-sub-legacystale`,
   };
 
   const stripeIds = {
@@ -107,11 +119,19 @@ describe('Stripe vendor Premium subscriptions', () => {
     free: `cus_${runId}_free`,
     rbSub: `sub_${runId}_rb`,
     nvSub: `sub_${runId}_nv`,
+    orderingOld: `sub_${runId}_ordering_old`,
+    staleNew: `sub_${runId}_stale_new`,
+    staleOld: `sub_${runId}_stale_old`,
+    lateCheckout: `sub_${runId}_late_checkout`,
+    failedTxn: `sub_${runId}_failed_txn`,
+    legacyNew: `sub_${runId}_legacy_new`,
+    legacyOld: `sub_${runId}_legacy_old`,
   };
 
   const wsSessionId = `cs_test_${runId}_ws1`;
   const openSessionId = `cs_test_${runId}_open`;
   const expiredSessionId = `cs_test_${runId}_exp`;
+  const lateCheckoutSessionId = `cs_test_${runId}_late`;
 
   let webhookSecret = '';
   let checkoutEnd: Date;
@@ -181,12 +201,17 @@ describe('Stripe vendor Premium subscriptions', () => {
       .send(body);
   }
 
-  function eventPayload(type: string, object: Record<string, unknown>, eventId?: string) {
+  function eventPayload(
+    type: string,
+    object: Record<string, unknown>,
+    eventId?: string,
+    created?: number,
+  ) {
     return {
       id: eventId ?? `evt_${runId}-${randomUUID().slice(0, 8)}`,
       object: 'event',
       api_version: '2024-06-20',
-      created: Math.floor(Date.now() / 1000),
+      created: created ?? Math.floor(Date.now() / 1000),
       livemode: false,
       pending_webhooks: 1,
       request: null,
@@ -271,7 +296,9 @@ describe('Stripe vendor Premium subscriptions', () => {
     app = createApp({ requireAuthMiddleware: requireAuth, stripeGateway: fake });
 
     // ── Seed users in the states the flows start from ───────────────────
-    const now = new Date();
+    // One time base for seed data and webhook event watermarks: a few
+    // seconds of setup latency must not make an "older" event look newer.
+    const now = new Date(testNow);
     function baseUser(id: string, role: string) {
       return {
         _id: id,
@@ -282,6 +309,25 @@ describe('Stripe vendor Premium subscriptions', () => {
         isBlocked: false,
         banned: false,
         createdAt: now,
+        updatedAt: now,
+      };
+    }
+    function activeMenuItem(vendorId: string, label: string, index: number) {
+      return {
+        vendorId,
+        name: `UITEST-${runId} ${label} ${index}`,
+        description: 'Seeded active item used by quota preservation tests',
+        tags: [],
+        category: 'pizza',
+        price: 10,
+        currency: 'BDT',
+        location: 'Dhanmondi, Dhaka',
+        imageUrl: 'https://i.ibb.co/test/seeded.png',
+        status: 'active',
+        isAvailable: true,
+        ratingAvg: 0,
+        ratingCount: 0,
+        createdAt: new Date(now.getTime() + index * 1000),
         updatedAt: now,
       };
     }
@@ -344,7 +390,57 @@ describe('Stripe vendor Premium subscriptions', () => {
           createdAt: now,
         },
       },
+      {
+        ...baseUser(ids.ordering, 'vendor'),
+        subscriptionPlan: 'premium',
+        subscriptionExpiresAt: new Date(now.getTime() + 30 * day),
+        stripeSubscriptionId: stripeIds.orderingOld,
+        stripeCustomerId: `cus_${runId}_ordering`,
+        subscriptionLifecycle: {
+          stripeSubscriptionId: stripeIds.orderingOld,
+          status: 'active',
+          eventCreated: nowSeconds - 100,
+          periodEnd: plus(30),
+        },
+      },
+      {
+        ...baseUser(ids.staleDelete, 'vendor'),
+        subscriptionPlan: 'premium',
+        subscriptionExpiresAt: new Date(plus(30) * 1000),
+        stripeSubscriptionId: stripeIds.staleNew,
+        stripeCustomerId: `cus_${runId}_stale`,
+        subscriptionLifecycle: {
+          stripeSubscriptionId: stripeIds.staleNew,
+          status: 'active',
+          eventCreated: nowSeconds,
+          periodEnd: plus(30),
+        },
+      },
+      {
+        ...baseUser(ids.lateCheckout, 'vendor'),
+        stripeCustomerId: `cus_${runId}_late`,
+      },
+      {
+        ...baseUser(ids.failedTxn, 'vendor'),
+        subscriptionPlan: 'premium',
+        subscriptionExpiresAt: new Date(plus(30) * 1000),
+        stripeSubscriptionId: stripeIds.failedTxn,
+        stripeCustomerId: `cus_${runId}_failedtxn`,
+      },
+      {
+        // Legacy document: no subscriptionLifecycle watermark, but the
+        // stored subscription id still identifies the current plan.
+        ...baseUser(ids.legacyStale, 'vendor'),
+        subscriptionPlan: 'premium',
+        subscriptionExpiresAt: new Date(plus(30) * 1000),
+        stripeSubscriptionId: stripeIds.legacyNew,
+        stripeCustomerId: `cus_${runId}_legacystale`,
+      },
     ]);
+
+    await getMenuItemsCollection().insertMany(
+      Array.from({ length: 5 }, (_, i) => activeMenuItem(ids.cancel, 'Cancel', i)),
+    );
 
     // ── Fake Stripe state (subscriptions the gateway can look up) ───────
     checkoutEnd = new Date(Math.floor((Date.now() + 30 * day) / 1000) * 1000);
@@ -358,11 +454,17 @@ describe('Stripe vendor Premium subscriptions', () => {
       status: 'active',
       currentPeriodEnd: checkoutEnd,
     });
+    fake.subscriptions.set(stripeIds.lateCheckout, {
+      id: stripeIds.lateCheckout,
+      status: 'active',
+      currentPeriodEnd: checkoutEnd,
+    });
     fake.checkoutSessions.set(openSessionId, { status: 'open' });
   });
 
   afterAll(async () => {
     await getUsersCollection().deleteMany({ _id: { $in: Object.values(ids) } });
+    await getMenuItemsCollection().deleteMany({ vendorId: { $in: Object.values(ids) } });
     await getTransactionsCollection().deleteMany({ vendorId: { $in: Object.values(ids) } });
     await getWebhookEventsCollection().deleteMany({
       stripeEventId: { $regex: `^evt_${runId}-` },
@@ -841,6 +943,207 @@ describe('Stripe vendor Premium subscriptions', () => {
     });
   });
 
+  // ═════════════════ Out-of-order Stripe events ═══════════════════════
+  describe('Stripe event ordering safety', () => {
+    it('does not let a late paid invoice reactivate a subscription that was already deleted', async () => {
+      const deleted = eventPayload(
+        'customer.subscription.deleted',
+        {
+          id: stripeIds.orderingOld,
+          object: 'subscription',
+          customer: `cus_${runId}_ordering`,
+          metadata: { vendorId: ids.ordering, kind: 'vendor_premium' },
+          status: 'canceled',
+          current_period_end: plus(30),
+        },
+        `evt_${runId}-ordering-delete`,
+        nowSeconds,
+      );
+      expect((await postWebhook(JSON.stringify(deleted))).status).toBe(200);
+
+      const lateInvoice = eventPayload(
+        'invoice.paid',
+        {
+          id: `in_${runId}_ordering_late`,
+          object: 'invoice',
+          billing_reason: 'subscription_cycle',
+          customer: `cus_${runId}_ordering`,
+          subscription: stripeIds.orderingOld,
+          amount_paid: 6000,
+          currency: 'usd',
+          period_end: plus(60),
+        },
+        `evt_${runId}-ordering-late-paid`,
+        nowSeconds - 10,
+      );
+      const res = await postWebhook(JSON.stringify(lateInvoice));
+      expect(res.status).toBe(200);
+      expect(res.body.data.handled).toBe(false);
+
+      const user = await getUsersCollection().findOne({ _id: ids.ordering });
+      expect(user?.subscriptionPlan).toBe('free');
+      expect(user?.subscriptionExpiresAt).toBeNull();
+    });
+
+    it('ignores canceled/delete events for an old subscription after a newer one exists', async () => {
+      for (const type of ['customer.subscription.deleted', 'customer.subscription.updated']) {
+        const payload = eventPayload(
+          type,
+          {
+            id: stripeIds.staleOld,
+            object: 'subscription',
+            customer: `cus_${runId}_stale`,
+            metadata: { vendorId: ids.staleDelete, kind: 'vendor_premium' },
+            status: 'canceled',
+            current_period_end: plus(10),
+          },
+          `evt_${runId}-stale-${type}`,
+          nowSeconds - 10,
+        );
+        const res = await postWebhook(JSON.stringify(payload));
+        expect(res.status).toBe(200);
+        expect(res.body.data.handled).toBe(false);
+      }
+
+      const user = await getUsersCollection().findOne({ _id: ids.staleDelete });
+      expect(user?.subscriptionPlan).toBe('premium');
+      expect(user?.subscriptionExpiresAt).toEqual(new Date(plus(30) * 1000));
+    });
+
+    it('does not shorten a newer expiry when an older checkout event arrives late', async () => {
+      const renewalEnd = new Date(plus(60) * 1000);
+      const renewal = eventPayload(
+        'invoice.paid',
+        {
+          id: `in_${runId}_late_renewal`,
+          object: 'invoice',
+          billing_reason: 'subscription_cycle',
+          customer: `cus_${runId}_late`,
+          subscription: stripeIds.lateCheckout,
+          amount_paid: 6000,
+          currency: 'usd',
+          period_end: plus(60),
+        },
+        `evt_${runId}-late-renewal`,
+        nowSeconds + 10,
+      );
+      expect((await postWebhook(JSON.stringify(renewal))).body.data.handled).toBe(true);
+
+      const lateCheckout = eventPayload(
+        'checkout.session.completed',
+        checkoutSessionObject(ids.lateCheckout, {
+          id: lateCheckoutSessionId,
+          customer: `cus_${runId}_late`,
+          subscription: stripeIds.lateCheckout,
+          payment_intent: `pi_${runId}_late`,
+        }),
+        `evt_${runId}-late-checkout`,
+        nowSeconds,
+      );
+      const res = await postWebhook(JSON.stringify(lateCheckout));
+      expect(res.status).toBe(200);
+      expect(res.body.data.handled).toBe(false);
+
+      const user = await getUsersCollection().findOne({ _id: ids.lateCheckout });
+      expect(user?.subscriptionExpiresAt).toEqual(renewalEnd);
+      const txns = await getTransactionsCollection().countDocuments({ vendorId: ids.lateCheckout });
+      expect(txns).toBe(1);
+    });
+
+    it('records a failed invoice payment and flips the same record to paid on recovery', async () => {
+      const invoiceId = `in_${runId}_failedtxn`;
+      const failed = eventPayload(
+        'invoice.payment_failed',
+        {
+          id: invoiceId,
+          object: 'invoice',
+          billing_reason: 'subscription_cycle',
+          customer: `cus_${runId}_failedtxn`,
+          subscription: stripeIds.failedTxn,
+          amount_due: 6000,
+          amount_paid: 0,
+          currency: 'usd',
+          payment_failure_message: 'Card declined.',
+        },
+        `evt_${runId}-failedtxn-failed`,
+        nowSeconds,
+      );
+      const failedRes = await postWebhook(JSON.stringify(failed));
+      expect(failedRes.body.data.handled).toBe(true);
+
+      const failedTxn = await getTransactionsCollection().findOne({ stripeSessionId: invoiceId });
+      expect(failedTxn).toMatchObject({
+        vendorId: ids.failedTxn,
+        paymentStatus: 'failed',
+        amount: 6000,
+        failureReason: 'Card declined.',
+        stripeSubscriptionId: stripeIds.failedTxn,
+      });
+      expect(failedTxn?.paidAt).toBeUndefined();
+
+      const paid = eventPayload(
+        'invoice.paid',
+        {
+          id: invoiceId,
+          object: 'invoice',
+          billing_reason: 'subscription_cycle',
+          customer: `cus_${runId}_failedtxn`,
+          subscription: stripeIds.failedTxn,
+          amount_paid: 6000,
+          currency: 'usd',
+          period_end: plus(60),
+        },
+        `evt_${runId}-failedtxn-paid`,
+        nowSeconds + 1,
+      );
+      expect((await postWebhook(JSON.stringify(paid))).body.data.handled).toBe(true);
+
+      const txns = await getTransactionsCollection().find({ vendorId: ids.failedTxn }).toArray();
+      expect(txns).toHaveLength(1);
+      expect(txns[0]).toMatchObject({ paymentStatus: 'paid', stripeSessionId: invoiceId });
+      expect(txns[0]?.paidAt).toBeInstanceOf(Date);
+      expect(txns[0]?.failureReason).toBeUndefined();
+    });
+
+    it('protects legacy vendors without a lifecycle watermark from old subscription events', async () => {
+      const staleDelete = eventPayload(
+        'customer.subscription.deleted',
+        {
+          id: stripeIds.legacyOld,
+          object: 'subscription',
+          customer: `cus_${runId}_legacystale`,
+          metadata: { vendorId: ids.legacyStale, kind: 'vendor_premium' },
+          status: 'canceled',
+          current_period_end: plus(20),
+        },
+        `evt_${runId}-legacy-stale-delete`,
+        nowSeconds - 10,
+      );
+      expect((await postWebhook(JSON.stringify(staleDelete))).body.data.handled).toBe(false);
+
+      const stalePaid = eventPayload(
+        'invoice.paid',
+        {
+          id: `in_${runId}_legacy_stale`,
+          object: 'invoice',
+          billing_reason: 'subscription_cycle',
+          customer: `cus_${runId}_legacystale`,
+          subscription: stripeIds.legacyOld,
+          amount_paid: 6000,
+          currency: 'usd',
+          period_end: plus(20),
+        },
+        `evt_${runId}-legacy-stale-paid`,
+        nowSeconds - 10,
+      );
+      expect((await postWebhook(JSON.stringify(stalePaid))).body.data.handled).toBe(false);
+
+      const user = await getUsersCollection().findOne({ _id: ids.legacyStale });
+      expect(user?.subscriptionPlan).toBe('premium');
+      expect(user?.subscriptionLifecycle).toBeUndefined();
+    });
+  });
+
   describe('Webhook event ledger compatibility', () => {
     it('stores eventType for new processed events', async () => {
       const payload = eventPayload('checkout.session.expired', {
@@ -966,6 +1269,13 @@ describe('Stripe vendor Premium subscriptions', () => {
       const user = await getUsersCollection().findOne({ _id: ids.cancel });
       expect(user?.subscriptionPlan).toBe('free');
       expect(user?.subscriptionExpiresAt).toBeNull();
+
+      // Downgrade preserves every menu document: the newest excess active
+      // items move to `inactive`, none are deleted or rejected.
+      const menuDocs = await getMenuItemsCollection().find({ vendorId: ids.cancel }).toArray();
+      expect(menuDocs).toHaveLength(5);
+      expect(menuDocs.filter((item) => item.status === 'active')).toHaveLength(3);
+      expect(menuDocs.filter((item) => item.status === 'inactive')).toHaveLength(2);
 
       const status = await request(app)
         .get('/api/subscriptions')

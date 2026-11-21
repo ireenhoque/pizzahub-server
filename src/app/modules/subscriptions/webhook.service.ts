@@ -1,12 +1,13 @@
 import { ObjectId, type ClientSession } from 'mongodb';
 import type Stripe from 'stripe';
-import { getDatabase } from '../../config/db.js';
 import {
   findBetterAuthUserById,
   getTransactionsCollection,
   getUsersCollection,
 } from '../../db/collections.js';
 import { getWebhookEventsCollection } from '../../db/webhookEvents.collection.js';
+import { runInTransaction } from '../../db/transactions.js';
+import { enforceFreePlanActiveLimitInSession } from '../menuItems/free-plan-limit.js';
 import { normalizeRoles } from '../../auth/require-auth.js';
 import { ApiError } from '../../error/ApiError.js';
 import type { BetterAuthUser } from '../../auth/auth.types.js';
@@ -66,25 +67,151 @@ function expiryMilliseconds(value: Date | string | null | undefined): number | n
   return Number.isNaN(milliseconds) ? null : milliseconds;
 }
 
+/** Stripe event times are epoch seconds; fall back to processing time if absent. */
+function eventCreatedSeconds(event: Stripe.Event): number {
+  return typeof event.created === 'number' && Number.isFinite(event.created)
+    ? Math.floor(event.created)
+    : Math.floor(Date.now() / 1000);
+}
+
+function isTerminalSubscriptionStatus(status: string): boolean {
+  return status === 'canceled' || status === 'unpaid' || status === 'incomplete_expired';
+}
+
+function lifecycleFor(
+  subscriptionId: string,
+  status: string,
+  event: Stripe.Event,
+  periodEndSeconds?: number,
+): NonNullable<BetterAuthUser['subscriptionLifecycle']> {
+  return {
+    stripeSubscriptionId: subscriptionId,
+    status,
+    eventCreated: eventCreatedSeconds(event),
+    ...(periodEndSeconds !== undefined ? { periodEnd: periodEndSeconds } : {}),
+    sourceEventId: event.id,
+  };
+}
+
 /**
- * Runs the given writes atomically. Every multi-document update in this
- * module goes through here; there is deliberately no fallback that would
- * silently persist a partial state.
+ * Guards payment/activation events against older deliveries. A terminal
+ * watermark wins ties, and a period end that does not advance the stored one
+ * cannot reactivate or extend a canceled subscription.
  */
-async function runInTransaction<T>(work: (session: ClientSession) => Promise<T>): Promise<T> {
-  const session = await getDatabase().client.startSession();
-  try {
-    let result!: T;
-    await session.withTransaction(
-      async () => {
-        result = await work(session);
-      },
-      { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } },
-    );
-    return result;
-  } finally {
-    await session.endSession();
+function isStalePaymentEvent(
+  vendor: BetterAuthUser,
+  event: Stripe.Event,
+  subscriptionId?: string | null,
+  periodEndSeconds?: number,
+): boolean {
+  const lifecycle = vendor.subscriptionLifecycle;
+  const created = eventCreatedSeconds(event);
+  if (!lifecycle) {
+    // Legacy users have no watermark. Still reject an event belonging to a
+    // different stored subscription unless it genuinely starts a later
+    // period; otherwise an old invoice could attach itself to a new plan.
+    if (
+      !subscriptionId ||
+      !vendor.stripeSubscriptionId ||
+      subscriptionId === vendor.stripeSubscriptionId
+    ) {
+      return false;
+    }
+    if (periodEndSeconds === undefined) {
+      return true;
+    }
+    const storedExpiry = expiryMilliseconds(vendor.subscriptionExpiresAt);
+    return storedExpiry === null || periodEndSeconds <= Math.floor(storedExpiry / 1000);
   }
+
+  if (created < lifecycle.eventCreated) {
+    return true;
+  }
+
+  const differentSubscription =
+    !!subscriptionId &&
+    !!lifecycle.stripeSubscriptionId &&
+    subscriptionId !== lifecycle.stripeSubscriptionId;
+
+  if (differentSubscription) {
+    if (isTerminalSubscriptionStatus(lifecycle.status)) {
+      const periodIsOld =
+        periodEndSeconds !== undefined &&
+        lifecycle.periodEnd !== undefined &&
+        periodEndSeconds <= lifecycle.periodEnd;
+      return created <= lifecycle.eventCreated || periodIsOld;
+    }
+    // A non-terminal watermark means this vendor is already attached to a
+    // different live subscription. Only accept a genuinely newer period.
+    return (
+      periodEndSeconds === undefined ||
+      lifecycle.periodEnd === undefined ||
+      periodEndSeconds <= lifecycle.periodEnd
+    );
+  }
+
+  if (isTerminalSubscriptionStatus(lifecycle.status)) {
+    if (created <= lifecycle.eventCreated) {
+      return true;
+    }
+    return (
+      periodEndSeconds !== undefined &&
+      lifecycle.periodEnd !== undefined &&
+      periodEndSeconds <= lifecycle.periodEnd
+    );
+  }
+
+  return false;
+}
+
+/** Guards canceled/deleted events so an old subscription cannot downgrade a new one. */
+function isStaleTerminalEvent(
+  vendor: BetterAuthUser,
+  event: Stripe.Event,
+  subscriptionId?: string | null,
+): boolean {
+  const lifecycle = vendor.subscriptionLifecycle;
+  if (!lifecycle) {
+    // Same legacy protection as payment events: an old subscription must
+    // never cancel a newer one just because the user predates watermarks.
+    return (
+      !!subscriptionId &&
+      !!vendor.stripeSubscriptionId &&
+      subscriptionId !== vendor.stripeSubscriptionId
+    );
+  }
+  if (
+    subscriptionId &&
+    lifecycle.stripeSubscriptionId &&
+    subscriptionId !== lifecycle.stripeSubscriptionId
+  ) {
+    return true;
+  }
+  return eventCreatedSeconds(event) < lifecycle.eventCreated;
+}
+
+function invoiceFailureReason(invoice: Stripe.Invoice): string | undefined {
+  const withFailure = invoice as Stripe.Invoice & {
+    payment_failure_message?: string;
+    last_payment_error?: { message?: string } | null;
+  };
+  return (
+    withFailure.last_payment_error?.message ??
+    withFailure.payment_failure_message ??
+    'Stripe invoice payment failed'
+  );
+}
+
+/**
+ * Re-reads the vendor INSIDE the transaction snapshot. Without the session,
+ * a concurrent webhook could read old state, then both writes would commit
+ * and the later (possibly stale) event would win.
+ */
+async function freshVendorForWrite(
+  vendor: BetterAuthUser,
+  session: ClientSession,
+): Promise<BetterAuthUser> {
+  return (await findBetterAuthUserById(String(vendor._id), session)) ?? vendor;
 }
 
 export function createWebhookService(gateway: StripeBillingGateway) {
@@ -96,13 +223,23 @@ export function createWebhookService(gateway: StripeBillingGateway) {
    * `processing` by a crashed process becomes reclaimable after
    * STALE_CLAIM_MS so an event can never get permanently stuck.
    */
-  async function claimEvent(stripeEventId: string, eventType: string): Promise<boolean> {
+  async function claimEvent(
+    stripeEventId: string,
+    eventType: string,
+    eventCreated: number,
+  ): Promise<boolean> {
     const events = getWebhookEventsCollection();
     try {
       const result = await events.updateOne(
         { stripeEventId },
         {
-          $setOnInsert: { stripeEventId, eventType, status: 'processing', receivedAt: new Date() },
+          $setOnInsert: {
+            stripeEventId,
+            eventType,
+            eventCreated,
+            status: 'processing',
+            receivedAt: new Date(),
+          },
         },
         { upsert: true },
       );
@@ -110,7 +247,7 @@ export function createWebhookService(gateway: StripeBillingGateway) {
         return true; // we inserted the claim
       }
       if (result.matchedCount === 1) {
-        return reclaimEvent(stripeEventId, eventType);
+        return reclaimEvent(stripeEventId, eventType, eventCreated);
       }
       return false;
     } catch (error) {
@@ -118,11 +255,15 @@ export function createWebhookService(gateway: StripeBillingGateway) {
         throw error;
       }
       // A concurrent delivery inserted the same event id first.
-      return reclaimEvent(stripeEventId, eventType);
+      return reclaimEvent(stripeEventId, eventType, eventCreated);
     }
   }
 
-  async function reclaimEvent(stripeEventId: string, eventType: string): Promise<boolean> {
+  async function reclaimEvent(
+    stripeEventId: string,
+    eventType: string,
+    eventCreated: number,
+  ): Promise<boolean> {
     const events = getWebhookEventsCollection();
     const existing = await events.findOne({ stripeEventId });
     if (!existing || existing.status === 'processed') {
@@ -132,17 +273,21 @@ export function createWebhookService(gateway: StripeBillingGateway) {
       // Stripe is retrying an event whose previous attempt failed.
       const reclaimed = await events.updateOne(
         { stripeEventId, status: 'failed' },
-        { $set: { status: 'processing', eventType } },
+        { $set: { status: 'processing', eventType, eventCreated } },
       );
       return reclaimed.modifiedCount === 1;
     }
     // status === 'processing': another delivery may be live. Only reclaim
     // when the claim is stale (crashed process), using a compare-and-swap
     // on the original receivedAt so exactly one retry wins.
-    if (existing.receivedAt.getTime() + STALE_CLAIM_MS < Date.now()) {
+    const receivedAtMs =
+      existing.receivedAt instanceof Date
+        ? existing.receivedAt.getTime()
+        : Date.parse(String(existing.receivedAt ?? ''));
+    if (Number.isFinite(receivedAtMs) && receivedAtMs + STALE_CLAIM_MS < Date.now()) {
       const reclaimed = await events.updateOne(
         { stripeEventId, status: 'processing', receivedAt: existing.receivedAt },
-        { $set: { status: 'processing', receivedAt: new Date(), eventType } },
+        { $set: { status: 'processing', receivedAt: new Date(), eventType, eventCreated } },
       );
       return reclaimed.modifiedCount === 1;
     }
@@ -215,22 +360,44 @@ export function createWebhookService(gateway: StripeBillingGateway) {
     const amount = session.amount_total ?? 0;
     const currency = session.currency;
     const recordPayment = amount > 0 && session.payment_status !== 'unpaid';
+    let processed = false;
 
     await runInTransaction(async (dbSession) => {
+      // Re-read inside the transaction so the ordering check sees the winner
+      // of any concurrent webhook delivery.
+      const current = await freshVendorForWrite(vendor, dbSession);
+      const periodEndSeconds = subscription
+        ? Math.floor(subscription.currentPeriodEnd.getTime() / 1000)
+        : undefined;
+      if (isStalePaymentEvent(current, event, subscriptionId, periodEndSeconds)) {
+        return; // older checkout must not shorten expiry or reactivate a cancel
+      }
+      processed = true;
+
       const set: Record<string, unknown> = { updatedAt: new Date() };
       if (customerId) set.stripeCustomerId = customerId;
       if (subscriptionId) set.stripeSubscriptionId = subscriptionId;
-      if (verifiedPayment && subscription) {
+      if (verifiedPayment && subscription && subscriptionId) {
         // Premium activation after VERIFIED payment (Stripe says the
         // subscription is active/trialing, i.e. the first invoice was paid).
         set.subscriptionPlan = 'premium';
-        set.subscriptionExpiresAt = subscription.currentPeriodEnd;
+        set.subscriptionLifecycle = lifecycleFor(
+          subscriptionId,
+          subscription.status,
+          event,
+          periodEndSeconds,
+        );
       }
       const update: Record<string, unknown> = { $set: set };
-      if (vendor.stripePendingCheckout?.sessionId === session.id) {
+      if (verifiedPayment && subscription) {
+        // $max keeps a later renewal/period from being shortened by a delayed
+        // checkout event whose Stripe lookup snapshot is older.
+        update.$max = { subscriptionExpiresAt: subscription.currentPeriodEnd };
+      }
+      if (current.stripePendingCheckout?.sessionId === session.id) {
         update.$unset = { stripePendingCheckout: '' };
       }
-      await getUsersCollection().updateOne({ _id: vendor._id }, update, { session: dbSession });
+      await getUsersCollection().updateOne({ _id: current._id }, update, { session: dbSession });
 
       if (recordPayment) {
         if (currency === null || currency === '') {
@@ -242,8 +409,8 @@ export function createWebhookService(gateway: StripeBillingGateway) {
         const transaction: Transaction = {
           _id: new ObjectId(),
           // Subscription payment: the vendor is the payer; never an orderId.
-          customerId: String(vendor._id),
-          vendorId: String(vendor._id),
+          customerId: String(current._id),
+          vendorId: String(current._id),
           stripeEventId: event.id,
           type: 'payment',
           paymentStatus: 'paid',
@@ -275,7 +442,7 @@ export function createWebhookService(gateway: StripeBillingGateway) {
         }
       }
     });
-    return true;
+    return processed;
   }
 
   /** checkout.session.expired — clears the matching pending session bookkeeping. */
@@ -316,21 +483,32 @@ export function createWebhookService(gateway: StripeBillingGateway) {
     const paymentIntentId = stripeResourceId(invoice.payment_intent);
     const periodEnd = new Date(invoice.period_end * 1000);
     const recordPayment = reason === 'subscription_cycle' && invoice.amount_paid > 0;
+    let processed = false;
 
     await runInTransaction(async (dbSession) => {
+      const current = await freshVendorForWrite(vendor, dbSession);
+      const periodEndSeconds = Math.floor(periodEnd.getTime() / 1000);
+      if (isStalePaymentEvent(current, event, subscriptionId, periodEndSeconds)) {
+        return; // a canceled/older subscription must not be reactivated
+      }
+      processed = true;
+
       const set: Record<string, unknown> = {
         subscriptionPlan: 'premium',
         updatedAt: new Date(),
       };
       if (subscriptionId) set.stripeSubscriptionId = subscriptionId;
       if (customerId) set.stripeCustomerId = customerId;
+      if (subscriptionId) {
+        set.subscriptionLifecycle = lifecycleFor(subscriptionId, 'active', event, periodEndSeconds);
+      }
 
       const update: Record<string, unknown> = {
         $set: set,
         // $max guarantees the expiry only ever moves forward.
         $max: { subscriptionExpiresAt: periodEnd },
       };
-      await getUsersCollection().updateOne({ _id: vendor._id }, update, { session: dbSession });
+      await getUsersCollection().updateOne({ _id: current._id }, update, { session: dbSession });
 
       if (recordPayment) {
         const now = new Date();
@@ -338,8 +516,8 @@ export function createWebhookService(gateway: StripeBillingGateway) {
         // idempotency slot carries the Stripe Invoice id instead.
         const transaction: Transaction = {
           _id: new ObjectId(),
-          customerId: String(vendor._id),
-          vendorId: String(vendor._id),
+          customerId: String(current._id),
+          vendorId: String(current._id),
           stripeEventId: event.id,
           type: 'payment',
           paymentStatus: 'paid',
@@ -364,10 +542,28 @@ export function createWebhookService(gateway: StripeBillingGateway) {
           } catch (error) {
             if (!isDuplicateKeyError(error)) throw error;
           }
+        } else if (existing.paymentStatus === 'failed') {
+          // A previously failed invoice for this same charge has now paid.
+          // Update that record instead of creating a second one.
+          await getTransactionsCollection().updateOne(
+            { _id: existing._id, paymentStatus: 'failed' },
+            {
+              $set: {
+                paymentStatus: 'paid',
+                paidAt: now,
+                updatedAt: now,
+                stripeEventId: event.id,
+                amount: invoice.amount_paid,
+                ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
+              },
+              $unset: { failureReason: '' },
+            },
+            { session: dbSession },
+          );
         }
       }
     });
-    return true;
+    return processed;
   }
 
   /**
@@ -382,19 +578,109 @@ export function createWebhookService(gateway: StripeBillingGateway) {
     const invoice = event.data.object as Stripe.Invoice;
     const vendor = await resolveVendorForInvoice(invoice);
 
-    if (!hasActivePremiumSubscription(vendor)) {
-      return false; // not eligible for grace — and never downgraded here either
-    }
+    // Eligibility is re-checked from the transaction snapshot below; the
+    // pre-transaction read may be stale and must not suppress a real payment
+    // failure record.
+    const subscriptionId = stripeResourceId(invoice.subscription);
+    const periodEndSeconds =
+      typeof invoice.period_end === 'number' ? Math.floor(invoice.period_end) : undefined;
+    const created = eventCreatedSeconds(event);
+    let processed = false;
 
-    const currentExpiry = expiryMilliseconds(vendor.subscriptionExpiresAt) ?? Date.now();
-    const graceExpiry = Math.max(currentExpiry, Date.now() + SUBSCRIPTION_GRACE_PERIOD_MS);
+    await runInTransaction(async (dbSession) => {
+      const current = await freshVendorForWrite(vendor, dbSession);
+      if (isStalePaymentEvent(current, event, subscriptionId, periodEndSeconds)) {
+        return; // an older failure must not extend grace or be recorded
+      }
+      // Re-check eligibility from the transaction snapshot. Preserve the
+      // existing contract: a failure from a vendor without active Premium is
+      // acknowledged but neither changes state nor creates a ledger record.
+      if (!hasActivePremiumSubscription(current)) {
+        return;
+      }
+      processed = true;
 
-    // Single-document update → atomically safe without a transaction.
-    await getUsersCollection().updateOne(
-      { _id: vendor._id },
-      { $set: { subscriptionExpiresAt: new Date(graceExpiry), updatedAt: new Date() } },
-    );
-    return true;
+      const now = new Date();
+      const currentExpiry = expiryMilliseconds(current.subscriptionExpiresAt) ?? now.getTime();
+      const graceExpiry = Math.max(currentExpiry, now.getTime() + SUBSCRIPTION_GRACE_PERIOD_MS);
+
+      // The watermark filter makes repeated/delayed failures idempotent:
+      // only the newest event can move the grace expiry.
+      await getUsersCollection().updateOne(
+        {
+          _id: current._id,
+          $or: [
+            { subscriptionLifecycle: { $exists: false } },
+            { 'subscriptionLifecycle.eventCreated': { $lt: created } },
+          ],
+        },
+        {
+          $set: {
+            subscriptionExpiresAt: new Date(graceExpiry),
+            updatedAt: now,
+            ...(subscriptionId
+              ? {
+                  subscriptionLifecycle: lifecycleFor(
+                    subscriptionId,
+                    'past_due',
+                    event,
+                    periodEndSeconds,
+                  ),
+                }
+              : {}),
+          },
+        },
+        { session: dbSession },
+      );
+
+      // Failure is a financial event in its own right. It uses the invoice id
+      // as the same unique anchor as a successful renewal, so a later
+      // invoice.paid flips this document instead of creating a duplicate.
+      const existing = await getTransactionsCollection().findOne(
+        { stripeSessionId: invoice.id },
+        { session: dbSession },
+      );
+      const failureReason = invoiceFailureReason(invoice);
+      if (!existing) {
+        const transaction: Transaction = {
+          _id: new ObjectId(),
+          customerId: String(current._id),
+          vendorId: String(current._id),
+          stripeEventId: event.id,
+          type: 'payment',
+          paymentStatus: 'failed',
+          amount: invoice.amount_due ?? 0,
+          currency: invoice.currency || 'usd',
+          stripeSessionId: invoice.id,
+          ...(subscriptionId ? { stripeSubscriptionId: subscriptionId } : {}),
+          failureReason,
+          createdAt: now,
+          updatedAt: now,
+        };
+        try {
+          await getTransactionsCollection().insertOne(transaction, { session: dbSession });
+        } catch (error) {
+          if (!isDuplicateKeyError(error)) throw error;
+        }
+      } else if (existing.paymentStatus === 'paid') {
+        await getTransactionsCollection().updateOne(
+          { _id: existing._id, paymentStatus: 'paid' },
+          {
+            $set: { paymentStatus: 'failed', failureReason, updatedAt: now },
+            $unset: { paidAt: '' },
+          },
+          { session: dbSession },
+        );
+      } else {
+        await getTransactionsCollection().updateOne(
+          { _id: existing._id, paymentStatus: 'failed' },
+          { $set: { failureReason, updatedAt: now, stripeEventId: event.id } },
+          { session: dbSession },
+        );
+      }
+    });
+
+    return processed;
   }
 
   /** Resolves the vendor for subscription events (metadata first, ids as fallback). */
@@ -428,27 +714,54 @@ export function createWebhookService(gateway: StripeBillingGateway) {
     if (!vendor) return false;
 
     const customerId = stripeResourceId(subscription.customer);
-    const set: Record<string, unknown> = {
-      stripeSubscriptionId: subscription.id,
-      updatedAt: new Date(),
-    };
-    if (customerId) set.stripeCustomerId = customerId;
+    const periodEnd = new Date(subscription.current_period_end * 1000);
+    const periodEndSeconds = Math.floor(subscription.current_period_end);
+    const isTerminal = subscription.status === 'canceled' || subscription.status === 'unpaid';
+    let processed = false;
 
-    const update: Record<string, unknown> = { $set: set };
-    if (subscription.status === 'canceled' || subscription.status === 'unpaid') {
-      if (vendor.subscriptionPlan === 'premium') {
+    await runInTransaction(async (dbSession) => {
+      const current = await freshVendorForWrite(vendor, dbSession);
+      if (
+        isTerminal
+          ? isStaleTerminalEvent(current, event, subscription.id)
+          : isStalePaymentEvent(current, event, subscription.id, periodEndSeconds)
+      ) {
+        return;
+      }
+      processed = true;
+
+      const now = new Date();
+      const set: Record<string, unknown> = {
+        stripeSubscriptionId: subscription.id,
+        updatedAt: now,
+        subscriptionLifecycle: lifecycleFor(
+          subscription.id,
+          subscription.status,
+          event,
+          periodEndSeconds,
+        ),
+      };
+      if (customerId) set.stripeCustomerId = customerId;
+
+      const update: Record<string, unknown> = { $set: set };
+      if (isTerminal && current.subscriptionPlan === 'premium') {
         set.subscriptionPlan = 'free';
         set.subscriptionExpiresAt = null;
+      } else if (
+        (subscription.status === 'active' || subscription.status === 'trialing') &&
+        current.subscriptionPlan === 'premium'
+      ) {
+        update.$max = { subscriptionExpiresAt: periodEnd };
       }
-    } else if (
-      (subscription.status === 'active' || subscription.status === 'trialing') &&
-      vendor.subscriptionPlan === 'premium'
-    ) {
-      update.$max = { subscriptionExpiresAt: new Date(subscription.current_period_end * 1000) };
-    }
 
-    await getUsersCollection().updateOne({ _id: vendor._id }, update);
-    return true;
+      await getUsersCollection().updateOne({ _id: current._id }, update, { session: dbSession });
+      if (isTerminal) {
+        // Documents are preserved; only excess active items are paused.
+        await enforceFreePlanActiveLimitInSession(String(current._id), dbSession);
+      }
+    });
+
+    return processed;
   }
 
   /** customer.subscription.deleted — downgrade once (idempotent). */
@@ -456,14 +769,38 @@ export function createWebhookService(gateway: StripeBillingGateway) {
     const subscription = event.data.object as Stripe.Subscription;
     const vendor = await resolveSubscriptionVendor(subscription);
     if (!vendor) return false;
-    if (vendor.subscriptionPlan !== 'premium') {
-      return true; // already downgraded (e.g. by the cancel endpoint) → no-op
-    }
-    await getUsersCollection().updateOne(
-      { _id: vendor._id },
-      { $set: { subscriptionPlan: 'free', subscriptionExpiresAt: null, updatedAt: new Date() } },
-    );
-    return true;
+
+    let processed = false;
+    await runInTransaction(async (dbSession) => {
+      const current = await freshVendorForWrite(vendor, dbSession);
+      if (isStaleTerminalEvent(current, event, subscription.id)) {
+        return; // an old subscription must never downgrade a newer one
+      }
+      processed = true;
+
+      const now = new Date();
+      const set: Record<string, unknown> = {
+        updatedAt: now,
+        subscriptionLifecycle: lifecycleFor(
+          subscription.id,
+          'canceled',
+          event,
+          Math.floor(subscription.current_period_end * 1000),
+        ),
+      };
+      if (current.subscriptionPlan === 'premium') {
+        set.subscriptionPlan = 'free';
+        set.subscriptionExpiresAt = null;
+      }
+      await getUsersCollection().updateOne(
+        { _id: current._id },
+        { $set: set },
+        { session: dbSession },
+      );
+      await enforceFreePlanActiveLimitInSession(String(current._id), dbSession);
+    });
+
+    return processed;
   }
 
   async function dispatch(event: Stripe.Event): Promise<boolean> {
@@ -493,7 +830,7 @@ export function createWebhookService(gateway: StripeBillingGateway) {
    * Stripe's retry can re-claim the same event safely.
    */
   async function processVerifiedEvent(event: Stripe.Event): Promise<WebhookOutcome> {
-    const claimed = await claimEvent(event.id, event.type);
+    const claimed = await claimEvent(event.id, event.type, eventCreatedSeconds(event));
     if (!claimed) {
       return { duplicate: true, handled: false };
     }

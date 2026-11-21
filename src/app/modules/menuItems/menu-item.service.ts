@@ -1,7 +1,11 @@
 import { ObjectId, type Filter } from 'mongodb';
-import { findBetterAuthUserById, getMenuItemsCollection } from '../../db/collections.js';
+import {
+  findBetterAuthUserById,
+  getMenuItemsCollection,
+  getUsersCollection,
+} from '../../db/collections.js';
 import { ApiError } from '../../error/ApiError.js';
-import type { AuthenticatedUser } from '../../auth/auth.types.js';
+import type { AuthenticatedUser, BetterAuthUser } from '../../auth/auth.types.js';
 import { assertOwnership } from '../../auth/ownership.js';
 import { hasActivePremiumSubscription } from '../users/user.service.js';
 import {
@@ -11,6 +15,12 @@ import {
 } from '../../types/menuItem.types.js';
 import { escapeRegex } from '../../utils/regex.js';
 import { uploadToImgBB } from '../../utils/imgbb.js';
+import {
+  assertCanAddActiveMenuItem,
+  freePlanLimitMessage,
+  FREE_PLAN_MAX_ACTIVE_MENU_ITEMS,
+  withMenuQuotaLock,
+} from './free-plan-limit.js';
 import type {
   AdminListMenuItemsQuery,
   CreateMenuItemInput,
@@ -22,11 +32,11 @@ import type {
   VendorUpdateMenuItemInput,
 } from './menu-item.types.js';
 
-/** Free-plan vendors can keep at most this many `active` menu items. */
-export const FREE_PLAN_MAX_ACTIVE_MENU_ITEMS = 3;
+/** Re-exported for existing consumers/tests; the rule lives in free-plan-limit.ts. */
+export { FREE_PLAN_MAX_ACTIVE_MENU_ITEMS } from './free-plan-limit.js';
 
-/** Whitelist serializer — the ImgBB delete URL is NEVER included. */
-export function toPublicMenuItem(item: MenuItem): PublicMenuItem {
+/** Whitelist serializer — the ImgBB delete URL and private vendor fields are NEVER included. */
+export function toPublicMenuItem(item: MenuItem, isPremium = false): PublicMenuItem {
   return {
     id: String(item._id),
     vendorId: item.vendorId,
@@ -40,6 +50,7 @@ export function toPublicMenuItem(item: MenuItem): PublicMenuItem {
     imageThumbUrl: item.imageThumbUrl ?? null,
     status: item.status,
     isAvailable: item.isAvailable,
+    isPremium,
     ratingAvg: item.ratingAvg,
     ratingCount: item.ratingCount,
     createdAt: item.createdAt,
@@ -80,11 +91,7 @@ export const menuItemService = {
       });
 
       if (activeCount >= FREE_PLAN_MAX_ACTIVE_MENU_ITEMS) {
-        throw new ApiError(
-          403,
-          `Your current plan allows at most ${FREE_PLAN_MAX_ACTIVE_MENU_ITEMS} active menu items. ` +
-            'Upgrade to a premium subscription for unlimited items.',
-        );
+        throw new ApiError(403, freePlanLimitMessage());
       }
     }
 
@@ -121,9 +128,19 @@ export const menuItemService = {
       updatedAt: now,
     };
 
-    const result = await getMenuItemsCollection().insertOne(doc as MenuItem);
+    // Authoritative re-check inside the vendor lock. The fast check above
+    // avoids a pointless image upload; this one closes the check-then-insert
+    // race with concurrent admin approvals for the same vendor.
+    const insertedId = await withMenuQuotaLock(vendor.userId, async (session) => {
+      await assertCanAddActiveMenuItem(vendor.userId, session);
+      const result = await getMenuItemsCollection().insertOne(doc as MenuItem, { session });
+      return result.insertedId;
+    });
 
-    return toPublicMenuItem({ ...doc, _id: result.insertedId } as MenuItem);
+    return toPublicMenuItem(
+      { ...doc, _id: insertedId } as MenuItem,
+      await isPremiumVendor(vendor.userId),
+    );
   },
 
   /**
@@ -161,9 +178,13 @@ export const menuItemService = {
     // Sorting – use requested field and order; default fallback handled in paginateMenuItems.
     const sortSpec: Record<string, 1 | -1> = {
       [query.sortBy]: query.sortOrder === 'asc' ? 1 : -1,
+      _id: 1,
     };
 
-    return paginateMenuItems(filterWithSearch, query, sortSpec);
+    // Public/storefront lists (including the homepage featured query) put
+    // current Premium vendors first. The premium flag is derived from the
+    // users collection on the server, never from a client query parameter.
+    return paginateMenuItems(filterWithSearch, query, sortSpec, { premiumFirst: true });
   },
   /** Vendor listing — own items only, every status, optional status filter. */
   async listVendorMenuItems(
@@ -207,19 +228,21 @@ export const menuItemService = {
       return null;
     }
 
+    const isPremium = await isPremiumVendor(item.vendorId);
+
     if (viewer?.roles.includes('admin')) {
-      return toPublicMenuItem(item);
+      return toPublicMenuItem(item, isPremium);
     }
 
     if (viewer?.roles.includes('vendor') && item.vendorId === viewer.userId) {
-      return toPublicMenuItem(item);
+      return toPublicMenuItem(item, isPremium);
     }
 
     if (item.status !== 'active') {
       return null;
     }
 
-    return toPublicMenuItem(item);
+    return toPublicMenuItem(item, isPremium);
   },
 
   /**
@@ -255,7 +278,7 @@ export const menuItemService = {
     if (!updated) {
       throw new ApiError(404, 'Menu item not found');
     }
-    return toPublicMenuItem(updated);
+    return toPublicMenuItem(updated, await isPremiumVendor(item.vendorId));
   },
 
   /**
@@ -272,7 +295,7 @@ export const menuItemService = {
     assertOwnership(vendor, item.vendorId);
 
     await items.deleteOne({ _id: item._id });
-    return toPublicMenuItem(item);
+    return toPublicMenuItem(item, await isPremiumVendor(item.vendorId));
   },
 
   /**
@@ -282,24 +305,41 @@ export const menuItemService = {
    * availability untouched.
    */
   async setMenuItemStatus(id: string, status: MenuItemStatus): Promise<PublicMenuItem> {
+    const itemId = toMenuItemId(id);
     const items = getMenuItemsCollection();
-    const item = await items.findOne({ _id: toMenuItemId(id) });
-    if (!item) {
+
+    // Cheap pre-read only to learn which vendor lock to take. The authoritative
+    // read, quota check and write all happen again inside the locked callback.
+    const initial = await items.findOne({ _id: itemId });
+    if (!initial) {
       throw new ApiError(404, 'Menu item not found');
     }
 
-    const set: Record<string, unknown> = { status, updatedAt: new Date() };
-    if (status === 'active') {
-      set.isAvailable = true;
-    }
+    return withMenuQuotaLock(initial.vendorId, async (session) => {
+      const item = await items.findOne({ _id: itemId }, { session });
+      if (!item) {
+        throw new ApiError(404, 'Menu item not found');
+      }
 
-    await items.updateOne({ _id: item._id }, { $set: set });
+      // Only a non-active → active transition consumes a free-plan slot.
+      // Re-approving an already-active item remains an idempotent no-op.
+      if (status === 'active' && item.status !== 'active') {
+        await assertCanAddActiveMenuItem(item.vendorId, session);
+      }
 
-    const updated = await items.findOne({ _id: item._id });
-    if (!updated) {
-      throw new ApiError(404, 'Menu item not found');
-    }
-    return toPublicMenuItem(updated);
+      const set: Record<string, unknown> = { status, updatedAt: new Date() };
+      if (status === 'active') {
+        set.isAvailable = true;
+      }
+
+      await items.updateOne({ _id: item._id }, { $set: set }, { session });
+
+      const updated = await items.findOne({ _id: item._id }, { session });
+      if (!updated) {
+        throw new ApiError(404, 'Menu item not found');
+      }
+      return toPublicMenuItem(updated, await isPremiumVendor(item.vendorId));
+    });
   },
 };
 
@@ -331,26 +371,82 @@ function buildSearchFilter(
   return filter;
 }
 
-/** Paginates a menu item filter, newest first. */
+/**
+ * Batch-loads the CURRENT premium status for the given vendor ids. Better
+ * Auth ids are strings by default, but ObjectId-stored ids are tolerated in
+ * the same way as elsewhere in the codebase. Only plan/expiry fields are
+ * read; no private vendor information is copied into menu responses.
+ */
+async function findPremiumVendorIds(vendorIds: string[]): Promise<Set<string>> {
+  const unique = Array.from(new Set(vendorIds.filter((id) => id.length > 0))).map(String);
+  if (unique.length === 0) {
+    return new Set();
+  }
+
+  const objectIds = unique.filter((id) => /^[0-9a-f]{24}$/i.test(id)).map((id) => new ObjectId(id));
+  const idFilter =
+    objectIds.length > 0
+      ? [{ _id: { $in: unique } }, { _id: { $in: objectIds } }]
+      : [{ _id: { $in: unique } }];
+
+  const users = await getUsersCollection()
+    .find({ subscriptionPlan: 'premium', $or: idFilter } as Filter<BetterAuthUser>, {
+      projection: { _id: 1, subscriptionPlan: 1, subscriptionExpiresAt: 1 },
+    })
+    .toArray();
+
+  return new Set(users.filter(hasActivePremiumSubscription).map((user) => String(user._id)));
+}
+
+/** Resolves one vendor's current premium status from the database. */
+async function isPremiumVendor(vendorId: string): Promise<boolean> {
+  return (await findPremiumVendorIds([vendorId])).has(String(vendorId));
+}
+
+/** Paginates a menu item filter; public lists can prioritize premium vendors. */
 async function paginateMenuItems(
   filter: Filter<MenuItem>,
   query: { page: number; limit: number },
   sortSpec?: Record<string, 1 | -1>,
+  options: { premiumFirst?: boolean } = {},
 ): Promise<ListMenuItemsResult> {
   const items = getMenuItemsCollection();
   const total = await items.countDocuments(filter);
   const skip = (query.page - 1) * query.limit;
+  const effectiveSort = sortSpec ?? { createdAt: -1, _id: 1 };
 
-  const cursor = items
-    .find(filter)
-    .sort(sortSpec ?? { createdAt: -1, _id: 1 })
-    .skip(skip)
-    .limit(query.limit);
+  let docs: MenuItem[];
+  let premiumVendorIds = new Set<string>();
 
-  const docs = await cursor.toArray();
+  if (options.premiumFirst) {
+    const vendorIds = (await items.distinct('vendorId', filter)).map(String);
+    premiumVendorIds = await findPremiumVendorIds(vendorIds);
+  }
+
+  if (options.premiumFirst && premiumVendorIds.size > 0) {
+    // One aggregation keeps filtering, priority, requested sort and pagination
+    // in the same query, so global totals/pages stay correct.
+    const prioritySort = { __premium: -1, ...effectiveSort, _id: 1 };
+    docs = await items
+      .aggregate<MenuItem>([
+        { $match: filter },
+        {
+          $addFields: {
+            __premium: { $cond: [{ $in: ['$vendorId', [...premiumVendorIds]] }, 1, 0] },
+          },
+        },
+        { $sort: prioritySort },
+        { $skip: skip },
+        { $limit: query.limit },
+        { $project: { __premium: 0 } },
+      ])
+      .toArray();
+  } else {
+    docs = await items.find(filter).sort(effectiveSort).skip(skip).limit(query.limit).toArray();
+  }
 
   return {
-    items: docs.map(toPublicMenuItem),
+    items: docs.map((doc) => toPublicMenuItem(doc, premiumVendorIds.has(String(doc.vendorId)))),
     pagination: {
       page: query.page,
       limit: query.limit,

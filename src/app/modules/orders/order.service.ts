@@ -86,16 +86,10 @@ export const orderService = {
       throw new ApiError(400, 'All items in an order must belong to the same vendor');
     }
 
-    // Simple duplicate active order check: same customer, same vendor, not cancelled/delivered, same menuItem.
-    const existing = await getOrdersCollection().findOne({
-      customerId: auth.userId,
-      vendorId,
-      'lineItems.menuItemId': { $in: snapshotItems.map((i) => i.menuItemId) },
-      status: { $nin: ['delivered', 'cancelled'] },
-    });
-    if (existing) {
-      throw new ApiError(400, 'You already have an active order for one of these items');
-    }
+    // Repeat orders are legitimate: a prior order containing the same item
+    // (including one still in flight) must not block checkout. Availability is
+    // re-checked above from the authoritative menu document; do not weaken
+    // that check or the role/single-vendor validation.
 
     const subtotal = snapshotItems.reduce((sum, li) => sum + li.unitPrice * li.quantity, 0);
     const deliveryFee = 0; // placeholder – could be dynamic.
