@@ -24,7 +24,7 @@ import {
  *
  * Reliability model:
  *  - the endpoint receives the RAW body (registered before express.json()
- *    in app.ts) and rejects bad signatures before touching the database;
+ *    in create-app.ts) and rejects bad signatures before touching the database;
  *  - each Stripe Event ID is claimed once in the `webhookEvents` collection
  *    (unique index) → duplicate/retried deliveries return 200 without
  *    reprocessing, failed attempts are re-claimed on Stripe's next retry;

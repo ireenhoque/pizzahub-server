@@ -1,38 +1,40 @@
 # PizzaHub deployment guide
 
-This guide is provider-neutral. The repository contains no `vercel.json`,
-`Dockerfile`, `Procfile`, or other platform-specific deployment configuration,
-so no hosting provider is assumed. Use any Node.js host for the Express API and
-any Next.js-capable Node host for the client.
+PizzaHub uses two separate GitHub repositories and two Vercel projects:
 
-## 1. Layout
+- `pizzahub-client` GitHub repository — Next.js 16 / React 19 frontend and Better
+  Auth routes (`/api/auth/*`)
+- `pizzahub-server` GitHub repository — Express 5 / TypeScript API deployed as a
+  Vercel Function using Vercel's zero-configuration Express support
 
-- `pizzahub-client/` — Next.js 16 / React 19 frontend and Better Auth server
-  routes (`/api/auth/*`)
-- `pizzahub-server/` — Express 5 / TypeScript API, MongoDB access, Stripe
-  subscription webhooks
+Each Vercel project connects to its own repository and uses the repository root
+(`./`) as Root Directory. Do not select a subdirectory.
 
-Both apps use the same MongoDB database. Better Auth owns the `users`
-collection; the Express API reads it on every authenticated request.
+No concrete deployment hostnames are hardcoded. Use your Vercel-assigned domains
+or custom domains through environment variables.
 
-## 2. Install, build, and start
+## 1. Local install, build, and start
 
 ### Backend
 
 ```bash
-cd pizzahub-server
+# Run from the pizzahub-server repository root
 npm ci
-npm run build
-npm start
+npm run dev       # local development with tsx watch
+npm run build     # tsc -> dist
+npm start         # compiled production server, local long-running process
 ```
 
-`npm start` runs the compiled `dist` output and forces `NODE_ENV=production`
-before loading the app. Database connection and required index verification
-finish before `app.listen()` is called. `npm run dev` and `npm run start:prod`
-remain available for local development and direct compiled startup.
+`npm start` runs `dist/scripts/start-production.js`, which forces
+`NODE_ENV=production` and starts `dist/scripts/serve-local.js`. The local server
+completes the memoized database bootstrap before `app.listen()`. `package.json`
+also points `main` at `dist/scripts/serve-local.js`, so direct Node execution
+uses the long-running server rather than a no-op re-export.
 
-Optional explicit index initialization (creates all defined indexes, including
-those on empty collections):
+For Vercel, do **not** use `npm start`. Vercel imports `src/index.ts`, exports
+the Express app, and never calls `app.listen()`.
+
+Optional explicit index initialization:
 
 ```bash
 npm run db:indexes
@@ -41,118 +43,164 @@ npm run db:indexes
 ### Frontend
 
 ```bash
-cd pizzahub-client
+# Run from the pizzahub-client repository root
 npm ci
+npm run dev
 npm run build
 npm start
 ```
 
-`NEXT_PUBLIC_API_BASE_URL` and `NEXT_PUBLIC_SITE_URL` must be present at build
-time in production. The build fails with the variable name (never its value)
-when they are missing or invalid. The remaining auth variables are read only at
-runtime by Better Auth.
+`NEXT_PUBLIC_API_BASE_URL` and `NEXT_PUBLIC_SITE_URL` are required for a
+production build. They are inlined at build time and must be set before Vercel
+starts the build.
+
+## 2. Vercel project settings
+
+### `pizzahub-server` Vercel project
+
+| Setting          | Value                                                                                                             |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Git Repository   | `pizzahub-server` GitHub repository                                                                               |
+| Root Directory   | `./` (repository root — do not select a subdirectory)                                                             |
+| Framework Preset | Express (auto-detected; selected entry point `src/index.ts`)                                                      |
+| Build Command    | Leave default / Vercel zero-config. Do **not** set `npm run build`; that emits `dist/` for the local Node server. |
+| Output Directory | Leave default / empty                                                                                             |
+| Install Command  | `npm install` (default)                                                                                           |
+| Node.js Version  | `22.x` (20+ required)                                                                                             |
+| Function runtime | Node.js (default), Fluid compute                                                                                  |
+
+Vercel's zero-config Express builder checks candidate filenames in this order:
+`app`, `index`, `server`, `src/app`, `src/index`, `src/server` (with JS/TS
+extensions). It keeps candidates whose file contents contain a textual `express`
+import, then selects the first match. It does not check for a default export
+before selecting.
+
+The app factory therefore lives in `src/create-app.ts`, which is deliberately
+not a Vercel candidate filename. The only matching candidate is `src/index.ts`,
+so that is the selected entry point. `src/index.ts` default-exports the gated
+Express app from `createVercelApp()`, applies `databaseBootstrapMiddleware`, and
+never calls `app.listen()`. `src/server.ts` is a harmless re-export and is not
+selected because it has no `express` import match.
+`src/scripts/serve-local.ts` is CLI-only and is not used by Vercel.
+
+### `pizzahub-client` Vercel project
+
+| Setting          | Value                                                 |
+| ---------------- | ----------------------------------------------------- |
+| Git Repository   | `pizzahub-client` GitHub repository                   |
+| Root Directory   | `./` (repository root — do not select a subdirectory) |
+| Framework Preset | Next.js (auto-detected)                               |
+| Build Command    | `npm run build` (default)                             |
+| Output Directory | `.next` (default)                                     |
+| Install Command  | `npm install` (default)                               |
+| Node.js Version  | `22.x`                                                |
+
+No `vercel.json` is required for either project.
 
 ## 3. Environment variables
 
-Never commit `.env`, `.env.local`, or real credentials. Copy the tracked
-`.env.example` files and inject values through the host's secret manager.
+Never commit `.env`, `.env.local`, or real credentials. Set these in the Vercel
+dashboard (Production and Preview as appropriate). Never print their values.
 
-### Backend (`pizzahub-server/.env.example`)
+### Backend Vercel project
 
-| Variable | Purpose | Required |
-| --- | --- | --- |
-| `NODE_ENV` | Runtime mode (`development` / `production`) | Yes |
-| `PORT` | HTTP listening port | Yes |
-| `CORS_ALLOWED_ORIGINS` | Comma-separated exact browser origins; required in production, wildcards rejected | Production yes |
-| `MONGODB_URI` | MongoDB connection string | Yes |
-| `DB_NAME` | Shared PizzaHub database name | Yes |
-| `BETTER_AUTH_JWKS_URL` | Frontend JWKS endpoint, usually `https://<frontend>/api/auth/jwks` | Yes |
-| `JWT_ISSUER` | Expected `iss`; must match the client's `JWT_ISSUER` | Yes |
-| `JWT_AUDIENCE` | Expected `aud`; must match the client's `JWT_AUDIENCE` | Yes |
-| `IMGBB_API_KEY` | Server-side image upload key | Yes |
-| `IMGBB_UPLOAD_URL` | Optional upload endpoint override | No |
-| `STRIPE_SECRET_KEY` | Stripe API key | Billing endpoints |
-| `STRIPE_WEBHOOK_SECRET` | Verifies Stripe signatures on the raw webhook body | Webhook |
-| `STRIPE_PREMIUM_PRICE_ID` | Existing server-owned Premium recurring Price ID | Checkout |
-| `STRIPE_SUCCESS_URL` | Browser return URL after successful checkout | Checkout |
-| `STRIPE_CANCEL_URL` | Browser return URL after cancelled checkout | Checkout |
+| Variable                  | Purpose                                                                | Required          |
+| ------------------------- | ---------------------------------------------------------------------- | ----------------- |
+| `NODE_ENV`                | Vercel injects `production`; no manual value normally needed           | Vercel-managed    |
+| `CORS_ALLOWED_ORIGINS`    | Exact deployed frontend origin(s), comma-separated; wildcards rejected | Yes               |
+| `MONGODB_URI`             | MongoDB connection string                                              | Yes               |
+| `DB_NAME`                 | Shared PizzaHub database name                                          | Yes               |
+| `BETTER_AUTH_JWKS_URL`    | `https://<frontend-origin>/api/auth/jwks`                              | Yes               |
+| `JWT_ISSUER`              | Expected `iss`; must match the frontend's `JWT_ISSUER`                 | Yes               |
+| `JWT_AUDIENCE`            | Expected `aud`; must match the frontend's `JWT_AUDIENCE`               | Yes               |
+| `IMGBB_API_KEY`           | Server-side image upload key                                           | Yes               |
+| `IMGBB_UPLOAD_URL`        | Optional upload endpoint override                                      | No                |
+| `STRIPE_SECRET_KEY`       | Stripe API key                                                         | Billing endpoints |
+| `STRIPE_WEBHOOK_SECRET`   | Verifies Stripe signatures on the raw webhook body                     | Webhook           |
+| `STRIPE_PREMIUM_PRICE_ID` | Existing server-owned Premium recurring Price ID                       | Checkout          |
+| `STRIPE_SUCCESS_URL`      | Browser return URL after successful checkout                           | Checkout          |
+| `STRIPE_CANCEL_URL`       | Browser return URL after cancelled checkout                            | Checkout          |
 
-Stripe variables are read lazily so non-billing endpoints still boot when
-Stripe is not configured; affected endpoints return `503` naming the missing
-variable.
+`PORT` is not required on Vercel. Stripe variables are read lazily; missing
+billing configuration returns a `503` naming the variable, never its value.
 
-### Frontend (`pizzahub-client/.env.example`)
+### Frontend Vercel project
 
-| Variable | Purpose | Required |
-| --- | --- | --- |
-| `NEXT_PUBLIC_API_BASE_URL` | Browser-reachable API base, including `/api` | Yes, at build time in production |
-| `NEXT_PUBLIC_SITE_URL` | Canonical frontend origin for metadata and absolute links | Yes, at build time in production |
-| `BETTER_AUTH_URL` | Canonical Better Auth origin and JWT `iss`/`aud` source | Yes, at runtime |
-| `BETTER_AUTH_SECRET` | Signs cookies and encrypts stored JWT keys | Yes, at runtime |
-| `MONGODB_URI` | Same MongoDB cluster as the backend | Yes, at runtime |
-| `DB_NAME` | Same database name as the backend | Yes, at runtime |
-| `JWT_ISSUER` | Must exactly match `BETTER_AUTH_URL` and backend `JWT_ISSUER` | Yes, at runtime |
-| `JWT_AUDIENCE` | Must exactly match `BETTER_AUTH_URL` and backend `JWT_AUDIENCE` | Yes, at runtime |
-| `GOOGLE_CLIENT_ID` | Google OAuth client ID | Yes, at runtime |
-| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret | Yes, at runtime |
+| Variable                   | Purpose                                                         | Required        |
+| -------------------------- | --------------------------------------------------------------- | --------------- |
+| `NEXT_PUBLIC_API_BASE_URL` | Browser-reachable backend base, including `/api`                | Yes, build-time |
+| `NEXT_PUBLIC_SITE_URL`     | Canonical frontend origin used for metadata                     | Yes, build-time |
+| `BETTER_AUTH_URL`          | Canonical Better Auth origin and JWT `iss`/`aud` source         | Yes, runtime    |
+| `BETTER_AUTH_SECRET`       | Signs cookies and encrypts stored JWT keys                      | Yes, runtime    |
+| `MONGODB_URI`              | Same MongoDB cluster as the backend                             | Yes, runtime    |
+| `DB_NAME`                  | Same database name as the backend                               | Yes, runtime    |
+| `JWT_ISSUER`               | Must exactly match `BETTER_AUTH_URL` and backend `JWT_ISSUER`   | Yes, runtime    |
+| `JWT_AUDIENCE`             | Must exactly match `BETTER_AUTH_URL` and backend `JWT_AUDIENCE` | Yes, runtime    |
+| `GOOGLE_CLIENT_ID`         | Google OAuth client ID                                          | Yes, runtime    |
+| `GOOGLE_CLIENT_SECRET`     | Google OAuth client secret                                      | Yes, runtime    |
 
-No `NEXT_PUBLIC_` variable should ever contain a secret. Error messages name
-the variable but never include its value.
+`NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` is not used by the current client and is
+not required. Production validation errors name the variable only, never its
+value.
 
-## 4. MongoDB and indexes
+## 4. MongoDB, warm starts, and indexes
 
-Use a MongoDB Atlas (or equivalent) URI with network access granted to both
-apps. The backend calls `ensureRequiredIndexes(db)` during startup and refuses
-to listen if required index verification fails; optional indexes on not-yet-
-existing collections are skipped without creating empty business collections.
-`npm run db:indexes` can be run once during provisioning to create every
-defined index explicitly. Re-running it is a no-op for identical definitions.
+The backend memoizes one database bootstrap promise per function instance:
 
-## 5. URLs and CORS
+1. `connectDatabase()` reuses a warm `MongoClient`.
+2. `ensureRequiredIndexes(db)` verifies the required unique indexes.
+3. `enforceExpiredPremiumMenuLimits()` reconciles lapsed Premium vendors.
+4. The same promise is reused by all warm invocations. A failure clears the
+   cache so the next request can retry.
 
-- Backend API base: `https://<api-host>/api`
-- Frontend/Better Auth origin: `https://<frontend-host>`
-- Set backend `CORS_ALLOWED_ORIGINS=https://<frontend-host>` (add extra exact
-  origins as a comma-separated list).
-- In development the backend defaults to `http://localhost:3000` and
-  `http://127.0.0.1:3000`; production has no implicit origins.
-- Preflight `OPTIONS` returns `204` with
-  `GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS` and allows `Authorization`
-  and `Content-Type`.
-- The browser client sends the short-lived JWT in `Authorization: Bearer`;
-  CORS credentials are not required.
-- Stripe success/cancel URLs must point to existing frontend pages.
+The readiness middleware runs before all routes, including protected database
+operations. It never disconnects per request. `npm run db:indexes` remains
+available for explicit provisioning; it is repeatable.
 
-## 6. Better Auth, JWKS, issuer, audience, and Google OAuth
+MongoDB Atlas must allow connections from Vercel's function IP ranges or use
+private networking. Reusing the same cluster/database in both Vercel projects
+is required: Better Auth owns `users`, Express reads it on every request.
 
-1. Enable the Better Auth JWT plugin with RS256. The app already configures
-   `jwks` with `RS256` and a 2048-bit modulus.
-2. Point backend `BETTER_AUTH_JWKS_URL` at
-   `https://<frontend-host>/api/auth/jwks`.
-3. Use the same exact origin for `BETTER_AUTH_URL` (client),
-   `JWT_ISSUER` (client), `JWT_AUDIENCE` (client), `JWT_ISSUER` (backend), and
-   `JWT_AUDIENCE` (backend). Do not add trailing slashes.
-4. Register `https://<frontend-host>/api/auth/callback/google` as an authorized
-   redirect URI in Google Cloud Console and set the client ID/secret on the
-   frontend only.
-5. Keep `BETTER_AUTH_SECRET`, Google credentials, and MongoDB credentials
-   server-side on the Next.js host.
+## 5. URLs, CORS, and Better Auth JWKS
 
-## 7. Stripe
+- Backend API base: `https://<backend-origin>/api`
+- Frontend/Better Auth origin: `https://<frontend-origin>`
+- Set backend `CORS_ALLOWED_ORIGINS` to the exact frontend origin(s).
+- Preflight `OPTIONS` returns `204` with `Authorization` and `Content-Type`.
+- The browser client sends the JWT in `Authorization: Bearer`; CORS cookies
+  are not required.
 
-Keep all Stripe keys and webhook secrets on the backend. Sandbox and live mode
-use separate API keys, webhook secrets, and Price IDs; stored customer and
-subscription IDs are mode-specific, so switching modes is a data migration
-decision, not a code change. Reuse the existing Premium Price ID through
+Better Auth configuration requirements:
+
+- `BETTER_AUTH_URL` on the frontend must be the exact deployed origin, with no
+  trailing slash or path.
+- `JWT_ISSUER` and `JWT_AUDIENCE` must equal that origin on both projects.
+- Backend `BETTER_AUTH_JWKS_URL` must be
+  `https://<frontend-origin>/api/auth/jwks`.
+- The frontend route `src/app/api/auth/[...all]/route.ts` exposes JWKS, token,
+  sign-in, sign-up, and sign-out endpoints.
+- Google OAuth callback:
+  `https://<frontend-origin>/api/auth/callback/google`.
+
+Because Better Auth uses one canonical origin, Vercel preview URLs have a known
+limitation: tokens still use the production issuer/audience, but Google OAuth
+redirects and origin checks follow `BETTER_AUTH_URL`. Configure Preview
+environment variables deliberately or test auth only on the canonical domain.
+
+## 6. Stripe
+
+Keep all Stripe values on the backend Vercel project. Sandbox and live mode use
+separate keys, webhook secrets, and Price IDs; stored customer/subscription IDs
+are mode-specific. Reuse the existing Premium Price ID via
 `STRIPE_PREMIUM_PRICE_ID`; do not recreate Stripe products or prices.
 
 Webhook endpoint:
 
 ```text
-POST https://<api-host>/api/stripe/webhook
+POST https://<backend-origin>/api/stripe/webhook
 ```
 
-Subscribe it to these event types:
+Subscribe it to:
 
 - `checkout.session.completed`
 - `checkout.session.expired`
@@ -162,40 +210,47 @@ Subscribe it to these event types:
 - `customer.subscription.updated`
 - `customer.subscription.deleted`
 
-The endpoint verifies the raw request body with `STRIPE_WEBHOOK_SECRET` and is
-idempotent. Use a Sandbox endpoint while testing; create a separate live
-endpoint for production.
+Vercel's Express builder passes the raw request stream to Express. The app's
+path-level `express.raw({ type: 'application/json' })` middleware runs before
+`express.json()`, and the webhook route fails closed if `req.body` is not a
+`Buffer`. No Vercel `bodyParser` override is needed for the zero-config Express
+Function.
 
-## 8. Recommended deployment order
+## 7. Recommended deployment order
 
-1. Provision MongoDB and confirm network access from both apps.
-2. Deploy the frontend with all public build-time URLs and runtime auth
-   secrets. Confirm `/api/auth/jwks` responds.
-3. Set backend `CORS_ALLOWED_ORIGINS` to the deployed frontend origin, then
-   deploy the backend. Confirm startup logs show a successful database boot.
-4. Run `npm run db:indexes` once if provisioning empty collections.
-5. Configure Google OAuth redirect URIs and Stripe success/cancel URLs with
-   the deployed frontend origin.
-6. Configure the Stripe webhook endpoint and secret, then perform a Sandbox
-   checkout and webhook smoke test.
-7. Only then switch to live-mode Stripe values if required.
+1. Provision MongoDB and allow Vercel connections.
+2. Deploy the frontend with build-time public URLs and runtime auth variables.
+3. Confirm `GET https://<frontend-origin>/api/auth/jwks` returns JWKS.
+4. Deploy the backend with `CORS_ALLOWED_ORIGINS`, JWKS URL, issuer/audience,
+   MongoDB, ImgBB, and Stripe variables.
+5. Run `npm run db:indexes` once if provisioning empty collections.
+6. Register the Google OAuth callback and Stripe webhook endpoint.
+7. Run the smoke tests below. Do not consider deployment successful until they
+   pass.
 
-## 9. Smoke tests
+## 8. Smoke tests
 
-- `GET https://<api-host>/api/health` returns a healthy response.
-- `GET https://<api-host>/api/menu` returns the public menu.
-- `OPTIONS` preflight from the configured frontend origin returns `204` with
-  the expected allow-methods/allow-headers; an unknown origin is not reflected.
-- `GET https://<frontend-host>/api/auth/jwks` returns JSON Web Keys.
+- `GET https://<backend-origin>/api/health` is healthy.
+- `GET https://<backend-origin>/api/menu` returns the public menu.
+- `OPTIONS` preflight from the frontend origin returns `204`; an unknown origin
+  is not reflected.
+- `GET https://<frontend-origin>/api/auth/jwks` returns JSON Web Keys.
 - Sign in, then call a protected API route with the Bearer token.
-- Vendor: create/edit a menu item and verify Premium/free-plan behavior.
+- Vendor: create/edit a menu item; Premium/free-plan rules still apply.
 - Customer: place an order; admin: load the overview dashboard.
-- Send a signed Sandbox Stripe test event to `/api/stripe/webhook` and verify a
-  `200` plus the expected subscription state change.
+- Send a signed Sandbox event to `/api/stripe/webhook`; expect `200` and the
+  expected subscription state change.
+- Verify backend Function logs show MongoDB connected once per cold start, not
+  once per request.
 
-## 10. Pre-flight blockers to resolve outside this repository
+## 9. Remaining manual configuration
 
-- Choose concrete frontend/backend hosts, DNS names, and TLS certificates.
-- Supply real MongoDB, Better Auth, Google OAuth, ImgBB, and Stripe values.
-- Confirm the Stripe mode and corresponding existing Premium Price ID.
-- Register the deployed Google OAuth callback and Stripe webhook endpoint.
+- Connect the frontend Vercel project to the `pizzahub-client` GitHub repository
+  with Root Directory `./`, and connect the backend Vercel project to the
+  `pizzahub-server` GitHub repository with Root Directory `./`. Do not select a
+  subdirectory.
+- Add all environment variables listed above.
+- Register deployed Google OAuth callback URLs.
+- Create the Stripe webhook endpoint and subscribe the seven event types.
+- Add deployed frontend origins to backend CORS.
+- Confirm MongoDB network access from Vercel.

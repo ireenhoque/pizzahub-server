@@ -13,7 +13,7 @@ import { verifyWebhookSignature, type StripeBillingGateway } from './stripe.clie
  * - `/api/subscriptions/*` requires the DB-verified JWT plus the vendor role.
  * - `/api/stripe/webhook` is intentionally NOT JWT-protected: it is secured
  *   by Stripe's HMAC signature over the RAW request body (express.raw() is
- *   registered for this path in app.ts BEFORE express.json()).
+ *   registered for this path in create-app.ts BEFORE express.json()).
  */
 export function createSubscriptionRouter(
   requireAuth: RequestHandler,
@@ -86,7 +86,7 @@ export function createStripeWebhookRouter(gateway: StripeBillingGateway): Router
   const receiveEvent: RequestHandler = async (req, res, next) => {
     try {
       if (!Buffer.isBuffer(req.body)) {
-        // The raw-body middleware in app.ts was not applied — refuse rather
+        // The raw-body middleware in create-app.ts was not applied — refuse rather
         // than verifying a parsed object (signatures would always fail open).
         throw new ApiError(500, 'Stripe webhook requires the raw request body');
       }

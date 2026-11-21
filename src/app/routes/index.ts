@@ -72,7 +72,7 @@ export function createApiRouter(options: ApiRouterOptions): Router {
   router.use('/subscriptions', createSubscriptionRouter(options.requireAuth, stripeGateway));
 
   // /api/stripe/webhook 窶・Stripe events (HMAC-secured; raw body registered
-  // in app.ts before express.json()).
+  // in create-app.ts before express.json()).
   router.use('/stripe/webhook', createStripeWebhookRouter(stripeGateway));
 
   return router;

@@ -8,7 +8,7 @@ import { ObjectId } from 'mongodb';
 import { connectDatabase, disconnectDatabase } from '../src/app/config/db.js';
 import { getTransactionsCollection, getUsersCollection } from '../src/app/db/collections.js';
 import { createRequireAuth } from '../src/app/auth/require-auth.js';
-import { createApp } from '../src/app.js';
+import { createApp } from '../src/create-app.js';
 import type { BetterAuthUser } from '../src/app/auth/auth.types.js';
 import type { Transaction } from '../src/app/types/transaction.types.js';
 

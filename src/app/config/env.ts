@@ -20,7 +20,13 @@ function readRequiredUrlEnv(key: string): string {
   return value;
 }
 
-const nodeEnv = readRequiredEnv('NODE_ENV');
+function readEnvWithDefault(key: string, fallback: string): string {
+  return process.env[key]?.trim() || fallback;
+}
+
+// Vercel injects NODE_ENV=production and does not allocate a PORT. Local
+// scripts set NODE_ENV explicitly and use 5000 by default.
+const nodeEnv = readEnvWithDefault('NODE_ENV', 'production');
 export function getStripeWebhookSecret(): string {
   return readRequiredEnv('STRIPE_WEBHOOK_SECRET');
 }
@@ -49,7 +55,7 @@ export function getStripeCancelUrl(): string {
   return readRequiredUrlEnv('STRIPE_CANCEL_URL');
 }
 
-const port = Number.parseInt(readRequiredEnv('PORT'), 10);
+const port = Number.parseInt(readEnvWithDefault('PORT', '5000'), 10);
 const mongoUri = readRequiredEnv('MONGODB_URI');
 const dbName = readRequiredEnv('DB_NAME');
 const betterAuthJwksUrl = readRequiredUrlEnv('BETTER_AUTH_JWKS_URL');

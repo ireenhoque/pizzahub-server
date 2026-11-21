@@ -1,4 +1,4 @@
-import type { Express } from 'express';
+import type { Express, RequestHandler } from 'express';
 import cors from 'cors';
 import express from 'express';
 import morgan from 'morgan';
@@ -21,6 +21,11 @@ export interface AppOptions {
   uploadImage?: UploadImageFn;
   /** Injectable Stripe gateway — defaults to the real Stripe SDK. Tests inject fakes. */
   stripeGateway?: StripeBillingGateway;
+  /**
+   * Optional readiness gate. The Vercel/entry-point apps pass the memoized
+   * database bootstrap so indexes are verified before any route runs.
+   */
+  bootstrapMiddleware?: RequestHandler;
 }
 
 export function createApp(options: AppOptions = {}): Express {
@@ -28,6 +33,9 @@ export function createApp(options: AppOptions = {}): Express {
 
   // --- Global middlewares ---
   app.use(cors(corsOptions));
+  if (options.bootstrapMiddleware) {
+    app.use(options.bootstrapMiddleware);
+  }
   // Stripe webhooks are verified against the RAW request bytes (Stripe-
   // Signature HMAC). This path-level raw parser MUST be registered before
   // express.json(): once a body parser has consumed the stream and set
@@ -58,5 +66,3 @@ export function createApp(options: AppOptions = {}): Express {
 
   return app;
 }
-
-export default createApp();
