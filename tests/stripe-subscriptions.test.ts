@@ -367,6 +367,9 @@ describe('Stripe vendor Premium subscriptions', () => {
     await getWebhookEventsCollection().deleteMany({
       stripeEventId: { $regex: `^evt_${runId}-` },
     });
+    await getWebhookEventsCollection().deleteMany({
+      stripeEventId: `cs_test_${runId}_compat_new`,
+    });
     await disconnectDatabase();
     if (jwksServer) await new Promise((resolve) => jwksServer.close(resolve));
   });
@@ -509,6 +512,7 @@ describe('Stripe vendor Premium subscriptions', () => {
       expect(res.body.data.handled).toBe(false);
       const doc = await getWebhookEventsCollection().findOne({ stripeEventId: payload.id });
       expect(doc?.status).toBe('processed');
+      expect(doc?.eventType).toBe('payment_intent.succeeded');
     });
   });
 
@@ -834,6 +838,76 @@ describe('Stripe vendor Premium subscriptions', () => {
       expect(again.status).toBe(200);
       const after = await getUsersCollection().findOne({ _id: ids.webhook });
       expect(after?.subscriptionPlan).toBe('free');
+    });
+  });
+
+  describe('Webhook event ledger compatibility', () => {
+    it('stores eventType for new processed events', async () => {
+      const payload = eventPayload('checkout.session.expired', {
+        id: `cs_test_${runId}_compat_new`,
+        object: 'checkout.session',
+        mode: 'subscription',
+        client_reference_id: ids.nosub,
+        metadata: { vendorId: ids.nosub, kind: 'vendor_premium' },
+        payment_status: 'unpaid',
+        amount_total: 6000,
+        currency: 'usd',
+      });
+      const res = await postWebhook(JSON.stringify(payload));
+      expect(res.status).toBe(200);
+      const doc = await getWebhookEventsCollection().findOne({ stripeEventId: payload.id });
+      expect(doc?.status).toBe('processed');
+      expect(doc?.eventType).toBe('checkout.session.expired');
+    });
+
+    it('treats a legacy processed event without eventType as a duplicate (compat)', async () => {
+      const eventId = `evt_${runId}-legacy-processed`;
+      await getWebhookEventsCollection().insertOne({
+        stripeEventId: eventId,
+        status: 'processed',
+        receivedAt: new Date(),
+        processedAt: new Date(),
+      } as never);
+      const payload = eventPayload(
+        'payment_intent.succeeded',
+        { id: `pi_${runId}_legacy` },
+        eventId,
+      );
+      const res = await postWebhook(JSON.stringify(payload));
+      expect(res.status).toBe(200);
+      expect(res.body.data.duplicate).toBe(true);
+      const doc = await getWebhookEventsCollection().findOne({ stripeEventId: eventId });
+      expect(doc?.status).toBe('processed');
+      expect(doc?.eventType).toBeUndefined();
+    });
+
+    it('reclaims and processes a legacy failed event without eventType (compat)', async () => {
+      const eventId = `evt_${runId}-legacy-failed`;
+      await getWebhookEventsCollection().insertOne({
+        stripeEventId: eventId,
+        status: 'failed',
+        receivedAt: new Date(),
+        lastError: 'previous failure',
+      } as never);
+      const payload = eventPayload(
+        'customer.subscription.updated',
+        {
+          id: `sub_${runId}_legacy_unknown`,
+          object: 'subscription',
+          customer: `cus_${runId}_legacy_unknown`,
+          status: 'active',
+          current_period_start: Math.floor(Date.now() / 1000),
+          current_period_end: Math.floor((Date.now() + 30 * day) / 1000),
+        },
+        eventId,
+      );
+      const res = await postWebhook(JSON.stringify(payload));
+      expect(res.status).toBe(200);
+      expect(res.body.data.duplicate).toBe(false);
+      const doc = await getWebhookEventsCollection().findOne({ stripeEventId: eventId });
+      expect(doc?.status).toBe('processed');
+      expect(doc?.eventType).toBe('customer.subscription.updated');
+      expect(doc?.processedAt).toBeInstanceOf(Date);
     });
   });
 

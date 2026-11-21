@@ -15,6 +15,8 @@ export type WebhookEventStatus = 'processing' | 'processed' | 'failed';
 export interface WebhookEventDocument {
   /** Stripe Event ID (evt_…) — unique; the idempotency key for the endpoint. */
   stripeEventId: string;
+  /** Stripe event type (e.g. `invoice.paid`). Absent on legacy records. */
+  eventType?: string;
   status: WebhookEventStatus;
   receivedAt: Date;
   /** Set when the event reaches `processed` (audit). */

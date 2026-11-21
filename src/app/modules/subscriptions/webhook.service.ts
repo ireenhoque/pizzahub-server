@@ -96,19 +96,21 @@ export function createWebhookService(gateway: StripeBillingGateway) {
    * `processing` by a crashed process becomes reclaimable after
    * STALE_CLAIM_MS so an event can never get permanently stuck.
    */
-  async function claimEvent(stripeEventId: string): Promise<boolean> {
+  async function claimEvent(stripeEventId: string, eventType: string): Promise<boolean> {
     const events = getWebhookEventsCollection();
     try {
       const result = await events.updateOne(
         { stripeEventId },
-        { $setOnInsert: { stripeEventId, status: 'processing', receivedAt: new Date() } },
+        {
+          $setOnInsert: { stripeEventId, eventType, status: 'processing', receivedAt: new Date() },
+        },
         { upsert: true },
       );
       if (result.upsertedCount === 1) {
         return true; // we inserted the claim
       }
       if (result.matchedCount === 1) {
-        return reclaimEvent(stripeEventId);
+        return reclaimEvent(stripeEventId, eventType);
       }
       return false;
     } catch (error) {
@@ -116,11 +118,11 @@ export function createWebhookService(gateway: StripeBillingGateway) {
         throw error;
       }
       // A concurrent delivery inserted the same event id first.
-      return reclaimEvent(stripeEventId);
+      return reclaimEvent(stripeEventId, eventType);
     }
   }
 
-  async function reclaimEvent(stripeEventId: string): Promise<boolean> {
+  async function reclaimEvent(stripeEventId: string, eventType: string): Promise<boolean> {
     const events = getWebhookEventsCollection();
     const existing = await events.findOne({ stripeEventId });
     if (!existing || existing.status === 'processed') {
@@ -130,7 +132,7 @@ export function createWebhookService(gateway: StripeBillingGateway) {
       // Stripe is retrying an event whose previous attempt failed.
       const reclaimed = await events.updateOne(
         { stripeEventId, status: 'failed' },
-        { $set: { status: 'processing' } },
+        { $set: { status: 'processing', eventType } },
       );
       return reclaimed.modifiedCount === 1;
     }
@@ -140,7 +142,7 @@ export function createWebhookService(gateway: StripeBillingGateway) {
     if (existing.receivedAt.getTime() + STALE_CLAIM_MS < Date.now()) {
       const reclaimed = await events.updateOne(
         { stripeEventId, status: 'processing', receivedAt: existing.receivedAt },
-        { $set: { status: 'processing', receivedAt: new Date() } },
+        { $set: { status: 'processing', receivedAt: new Date(), eventType } },
       );
       return reclaimed.modifiedCount === 1;
     }
@@ -491,7 +493,7 @@ export function createWebhookService(gateway: StripeBillingGateway) {
    * Stripe's retry can re-claim the same event safely.
    */
   async function processVerifiedEvent(event: Stripe.Event): Promise<WebhookOutcome> {
-    const claimed = await claimEvent(event.id);
+    const claimed = await claimEvent(event.id, event.type);
     if (!claimed) {
       return { duplicate: true, handled: false };
     }
