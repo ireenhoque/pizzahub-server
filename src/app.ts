@@ -3,6 +3,7 @@ import cors from 'cors';
 import express from 'express';
 import morgan from 'morgan';
 import { requireAuth } from './app/auth/require-auth.js';
+import { corsOptions } from './app/config/cors.js';
 import { env } from './app/config/env.js';
 import { globalErrorHandler } from './app/error/globalErrorHandler.js';
 import { notFoundHandler } from './app/error/notFoundHandler.js';
@@ -26,11 +27,7 @@ export function createApp(options: AppOptions = {}): Express {
   const app = express();
 
   // --- Global middlewares ---
-  app.use(
-    cors({
-      origin: '*',
-    }),
-  );
+  app.use(cors(corsOptions));
   // Stripe webhooks are verified against the RAW request bytes (Stripe-
   // Signature HMAC). This path-level raw parser MUST be registered before
   // express.json(): once a body parser has consumed the stream and set
